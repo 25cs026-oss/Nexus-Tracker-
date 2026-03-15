@@ -1,0 +1,75 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: grids
+    // Document ID: {pin}
+    // Fields:
+    //   - id: string (the pin)
+    //   - name: string
+    //   - createdAt: timestamp
+    //
+    // Collection: devices
+    // Document ID: {deviceId}
+    // Fields:
+    //   - name: string
+    //   - lastLat: number
+    //   - lastLng: number
+    //   - lastUpdated: timestamp
+    //   - gridId: string (the pin)
+    //
+    // Collection: devices/{deviceId}/history
+    // Document ID: {historyId}
+    // Fields:
+    //   - lat: number
+    //   - lng: number
+    //   - timestamp: timestamp
+    //
+    // ===============================================================
+
+    function isValidGrid(data) {
+      return data.keys().hasAll(['id', 'name', 'createdAt']) &&
+             data.id is string && data.id.size() >= 4 &&
+             data.name is string && data.name.size() > 0 &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidDevice(data) {
+      return data.keys().hasAll(['name', 'lastLat', 'lastLng', 'lastUpdated', 'gridId']) &&
+             data.name is string &&
+             data.lastLat is number &&
+             data.lastLng is number &&
+             data.lastUpdated is timestamp &&
+             data.gridId is string;
+    }
+
+    function isValidHistory(data) {
+      return data.keys().hasAll(['lat', 'lng', 'timestamp']) &&
+             data.lat is number &&
+             data.lng is number &&
+             data.timestamp is timestamp;
+    }
+
+    match /grids/{pin} {
+      allow read: if true; // Knowledge of PIN is the auth
+      allow create: if isValidGrid(request.resource.data) && request.resource.data.id == pin;
+      allow update: if false; // Grids are immutable for now
+    }
+
+    match /devices/{deviceId} {
+      allow read: if true; // Scoped by gridId in query
+      allow create, update: if isValidDevice(request.resource.data);
+      allow delete: if true;
+
+      match /history/{historyId} {
+        allow read: if true;
+        allow create: if isValidHistory(request.resource.data);
+        allow delete: if true;
+      }
+    }
+  }
+}

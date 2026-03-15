@@ -1,0 +1,7 @@
+{
+  "name": "Nexus Track",
+  "description": "A high-futuristic real-time GPS tracking system with 3-day history and PIN protection.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
