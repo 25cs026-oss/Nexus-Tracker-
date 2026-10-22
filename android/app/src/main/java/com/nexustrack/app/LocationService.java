@@ -51,10 +51,10 @@ public class LocationService extends Service implements LocationListener {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
                     "Nexus Live Location Tracking",
-                    NotificationManager.IMPORTANCE_LOW
+                    NotificationManager.IMPORTANCE_DEFAULT
             );
             channel.setDescription("Keeps family location sharing active in background");
-            channel.setShowBadge(false);
+            channel.setShowBadge(true);
 
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {
@@ -79,7 +79,7 @@ public class LocationService extends Service implements LocationListener {
                 .setSmallIcon(android.R.drawable.ic_menu_mylocation)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .build();
 

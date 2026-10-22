@@ -120,8 +120,8 @@ export function formatRelativeTime(timestamp: any): string {
   const now = Date.now();
   const diffSec = Math.floor((now - date.getTime()) / 1000);
 
-  if (diffSec < 45) return 'Live';
-  if (diffSec < 60) return 'Just now';
+  if (diffSec < 90) return 'Live';
+  if (diffSec < 150) return '1m ago';
   if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });

@@ -210,7 +210,7 @@ export class GeolocationService {
       this.pollIntervalId = null;
     }
 
-    const intervalMs = this.isEcoMode ? 30000 : 15000;
+    const intervalMs = this.isEcoMode ? 15000 : 10000;
     this.pollIntervalId = window.setInterval(() => {
       if (!this.isRunning) return;
 
@@ -224,7 +224,7 @@ export class GeolocationService {
             // If GPS is temporarily unavailable indoors, emit cached position as heartbeat
             if (this.lastKnownPosition && this.isRunning) {
               const now = Date.now();
-              const minInterval = this.isEcoMode ? 25000 : 10000;
+              const minInterval = this.isEcoMode ? 15000 : 9000;
               if (now - this.lastEmitTime >= minInterval) {
                 this.lastEmitTime = now;
                 this.onPositionCallback?.(this.lastKnownPosition);
@@ -233,8 +233,8 @@ export class GeolocationService {
           },
           {
             enableHighAccuracy: !this.isEcoMode,
-            timeout: 10000,
-            maximumAge: this.isEcoMode ? 30000 : 10000
+            timeout: 8000,
+            maximumAge: this.isEcoMode ? 15000 : 8000
           }
         );
       }
@@ -255,8 +255,8 @@ export class GeolocationService {
 
   private handleSuccess(position: GeolocationPosition, isApproximate: boolean) {
     const now = Date.now();
-    // In foreground: throttle to ~10s. In background eco mode: throttle to ~25s.
-    const minInterval = this.isEcoMode ? 25000 : 9500;
+    // In foreground: throttle to ~10s. In background eco mode: throttle to ~15s.
+    const minInterval = this.isEcoMode ? 15000 : 9000;
     
     const { latitude, longitude, accuracy, speed, heading } = position.coords;
     const result: GeoLocationResult = {

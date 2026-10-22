@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nexus-tracker-pwa-v3';
+const CACHE_NAME = 'nexus-tracker-pwa-v4';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -74,6 +74,23 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
+// Handle persistent notification click in mobile notification drawer
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url && 'focus' in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(event.notification.data?.url || '/');
+      }
+    })
+  );
+});
+
 // Background Sync
 self.addEventListener('sync', (event) => {
   if (event.tag === 'nexus-location-sync') {
@@ -97,5 +114,21 @@ self.addEventListener('periodicsync', (event) => {
         });
       })
     );
+  }
+});
+
+// Message listener from foreground pages
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SHOW_PERSISTENT_NOTIFICATION') {
+    self.registration.showNotification('Nexus Family Tracker', {
+      body: '🟢 Live Background Location Active (10s intervals)',
+      icon: '/pwa-192x192.png',
+      badge: '/icon.svg',
+      tag: 'nexus-live-status',
+      ongoing: true,
+      silent: true,
+      requireInteraction: true,
+      data: { url: event.data?.url || '/' }
+    });
   }
 });

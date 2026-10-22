@@ -60,6 +60,7 @@ import { NavigationModal } from './components/NavigationModal';
 import { InstallAppModal } from './components/InstallAppModal';
 import { BackgroundGuideModal } from './components/BackgroundGuideModal';
 import { backgroundRunner } from './utils/backgroundRunner';
+import { notificationManager } from './utils/notificationManager';
 
 import { 
   Users, 
@@ -231,8 +232,7 @@ export default function App() {
     if (!coords) return;
 
     const now = Date.now();
-    const isHidden = isAppHiddenRef.current;
-    const minInterval = isHidden ? 25000 : 12000;
+    const minInterval = 9000; // 9-10s interval guarantees members continuously stay "Live"
     const elapsed = now - lastFirestoreSyncRef.current;
 
     if (!forced && lastFirestoreSyncRef.current > 0 && elapsed < minInterval) {
@@ -356,20 +356,23 @@ export default function App() {
     if (currentCircle) {
       backgroundRunner.autoStart();
       sendHeartbeat(true);
+      notificationManager.showLiveTrackingNotification(currentCircle.name, members.length);
     }
-  }, [currentCircle, sendHeartbeat]);
+  }, [currentCircle, sendHeartbeat, members.length]);
 
   const toggleBackgroundTracking = async () => {
     if (isBackgroundActive) {
       backgroundRunner.stop();
       setIsBackgroundActive(false);
       setIsWakeLockActive(false);
+      notificationManager.clearNotification();
     } else {
       const ok = await backgroundRunner.start();
       if (ok) {
         setIsBackgroundActive(true);
         setIsWakeLockActive(true);
         sendHeartbeat(true);
+        notificationManager.showLiveTrackingNotification(currentCircle?.name, members.length);
       } else {
         setShowBackgroundModal(true);
       }
@@ -630,11 +633,11 @@ export default function App() {
     setIsTracking(true);
     geoService.startTracking(handlePositionUpdate, handleStatusUpdate);
 
-    // Guaranteed 15s Heartbeat transmitter (eliminates stationary "9h ago" bug)
+    // Guaranteed 10s Heartbeat transmitter (eliminates stationary "9h ago" & background disconnects)
     if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
     heartbeatIntervalRef.current = window.setInterval(() => {
       sendHeartbeat();
-    }, 15000);
+    }, 10000);
 
     if (historyIntervalId.current) clearInterval(historyIntervalId.current);
     historyIntervalId.current = window.setInterval(async () => {
@@ -1388,6 +1391,28 @@ export default function App() {
     <div className="h-[100dvh] overflow-hidden relative lg:h-auto lg:min-h-screen lg:overflow-visible flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 font-sans select-none">
 
       
+      {/* 🟢 Status Bar Notification Enable Banner */}
+      {typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default' && (
+        <div className="fixed top-3 left-3 right-3 sm:left-auto sm:right-4 sm:w-88 z-50 bg-slate-900/95 dark:bg-slate-800/95 text-white backdrop-blur-xl border border-blue-500/40 rounded-2xl p-2.5 shadow-2xl flex items-center justify-between gap-3 text-xs animate-in fade-in slide-in-from-top-4">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+            <div className="truncate">
+              <span className="font-bold text-white block">Keep Active in Background</span>
+              <span className="text-[10px] text-slate-300">Show in notification bar like other apps</span>
+            </div>
+          </div>
+          <button
+            onClick={async () => {
+              await notificationManager.requestPermission();
+              await notificationManager.showLiveTrackingNotification(currentCircle?.name);
+            }}
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-bold text-xs rounded-xl shadow-md shrink-0 transition-all"
+          >
+            Allow
+          </button>
+        </div>
+      )}
+
       {/* 🔔 Host Join Request Approval Banner (Floating at Top) */}
       {pendingJoinRequests.length > 0 && isCircleOwner && (
         <div className="fixed top-14 left-3 right-3 sm:left-auto sm:right-4 sm:w-96 z-50 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-2 border-blue-500 rounded-3xl p-3.5 shadow-2xl space-y-2 animate-bounce-subtle">

@@ -1,37 +1,131 @@
 /**
  * Nexus Background Location Runner
  * 
- * Uses HTML5 Audio Loop + MediaSession API + Autoplay User-Gesture Hook
- * to keep GPS tracking alive in the background when phone screen is locked
- * or switching apps, without forcing screen to stay awake (minimizing battery usage).
- * 
- * Works 100% automatically with zero manual clicks required.
+ * Multi-layer background persistence engine:
+ * 1. Generates a valid 10-second sub-audible (25Hz) PCM WAV track
+ * 2. Runs HTML5 Audio loop + Web Audio API Oscillator
+ * 3. Registers Android MediaSession notification in notification drawer
+ * 4. Runs an isolated Web Worker heartbeat timer that CANNOT be throttled by mobile Chrome
+ * 5. Integrates with Web Notification API to pin ongoing status in Android notification bar
  */
 
-// 1-second silent WAV audio
-const SILENT_WAV_BASE64 = 'data:audio/wav;base64,UklGRjIAAABXQVZFZm10IBIAAAABAAEAQB8AAEAfAAABAAgAAABkYXRhEgAAAAEAAQCg/6D/oP+g/6D/';
+import { notificationManager } from './notificationManager';
+
+/**
+ * Creates a valid PCM WAV blob with sub-audible frequency (25Hz).
+ * Mobile Chrome requires real PCM samples and duration to activate MediaSession
+ * and grant background execution wake locks.
+ */
+function generateSubAudibleWavBlob(durationSeconds = 10, sampleRate = 22050): Blob {
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const byteRate = sampleRate * blockAlign;
+  const numSamples = durationSeconds * sampleRate;
+  const dataSize = numSamples * blockAlign;
+  const totalSize = 44 + dataSize;
+  const buffer = new ArrayBuffer(totalSize);
+  const view = new DataView(buffer);
+
+  // Write ASCII string helper
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  // RIFF Chunk Descriptor
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+
+  // "fmt " Sub-chunk
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+  view.setUint16(20, 1, true); // AudioFormat (1 = PCM)
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+
+  // "data" Sub-chunk
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  // 25 Hz sub-audible sine wave (imperceptible, but recognized by OS as active audio)
+  const amplitude = 60; // Inaudible (0.18% of 32767)
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    const sample = Math.sin(2 * Math.PI * 25 * t) * amplitude;
+    view.setInt16(44 + i * 2, Math.round(sample), true);
+  }
+
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+// Inline Web Worker script that runs unthrottled in an isolated OS background thread
+const WORKER_SCRIPT = `
+  let timer = null;
+  self.onmessage = function(e) {
+    if (e.data === 'START') {
+      if (timer) clearInterval(timer);
+      timer = setInterval(function() {
+        self.postMessage('TICK');
+      }, 10000);
+    } else if (e.data === 'STOP') {
+      if (timer) clearInterval(timer);
+      timer = null;
+    }
+  };
+`;
 
 export class BackgroundLocationRunner {
   private audio: HTMLAudioElement | null = null;
+  private audioContext: AudioContext | null = null;
+  private oscillator: OscillatorNode | null = null;
+  private worker: Worker | null = null;
   private isRunning: boolean = false;
   private onStateChangeCallback: ((active: boolean) => void) | null = null;
   private onHeartbeatCallback: (() => void) | null = null;
-  private heartbeatInterval: number | null = null;
   private hasArmedGestureListener: boolean = false;
+  private fallbackInterval: number | null = null;
 
   constructor() {
     if (typeof window !== 'undefined') {
+      this.initWorker();
       this.initAudio();
+    }
+  }
+
+  private initWorker() {
+    try {
+      if (typeof window !== 'undefined' && 'Worker' in window) {
+        const blob = new Blob([WORKER_SCRIPT], { type: 'application/javascript' });
+        this.worker = new Worker(URL.createObjectURL(blob));
+        this.worker.onmessage = (e) => {
+          if (e.data === 'TICK' && this.isRunning) {
+            // Heartbeat received from unthrottled background worker thread!
+            this.ensureAudioPlaying();
+            this.onHeartbeatCallback?.();
+          }
+        };
+      }
+    } catch (err) {
+      console.warn('BackgroundRunner: Worker initialization skipped:', err);
     }
   }
 
   private initAudio() {
     try {
-      this.audio = new Audio(SILENT_WAV_BASE64);
-      this.audio.loop = true;
-      this.audio.volume = 0.01; // Inaudible
+      const wavBlob = generateSubAudibleWavBlob(10, 22050);
+      const audioUrl = URL.createObjectURL(wavBlob);
 
-      // Auto-recover if paused by system/phone call while marked running
+      this.audio = new Audio(audioUrl);
+      this.audio.loop = true;
+      this.audio.volume = 0.05; // Effectively inaudible, but registers with AudioFlinger
+
+      // Keep playing if interrupted by system
       this.audio.addEventListener('pause', () => {
         if (this.isRunning && this.audio && this.audio.paused) {
           this.audio.play().catch(() => {});
@@ -48,6 +142,47 @@ export class BackgroundLocationRunner {
     }
   }
 
+  private initAudioContext() {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      if (!this.audioContext || this.audioContext.state === 'closed') {
+        this.audioContext = new AudioCtx();
+      }
+
+      if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume().catch(() => {});
+      }
+
+      if (!this.oscillator) {
+        const osc = this.audioContext.createOscillator();
+        const gain = this.audioContext.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(25, this.audioContext.currentTime); // 25Hz sub-bass
+        gain.gain.setValueAtTime(0.002, this.audioContext.currentTime);
+        osc.connect(gain);
+        gain.connect(this.audioContext.destination);
+        osc.start();
+        this.oscillator = osc;
+      }
+    } catch (err) {
+      console.warn('BackgroundRunner: AudioContext init error:', err);
+    }
+  }
+
+  private ensureAudioPlaying() {
+    if (!this.isRunning) return;
+
+    if (this.audio && this.audio.paused) {
+      this.audio.play().catch(() => {});
+    }
+
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      this.audioContext.resume().catch(() => {});
+    }
+  }
+
   public onStateChange(callback: (active: boolean) => void) {
     this.onStateChangeCallback = callback;
   }
@@ -57,10 +192,9 @@ export class BackgroundLocationRunner {
   }
 
   /**
-   * Automatically start background service.
-   * If browser autoplay restrictions block it initially,
-   * arms a one-shot window listener so the VERY FIRST user touch
-   * or tap activates it without requiring any button clicks.
+   * Automatic zero-click startup.
+   * If mobile browser autoplay policy blocks audio initially,
+   * arms a one-shot window listener so the very first touch/tap activates it.
    */
   public autoStart() {
     if (this.isRunning) return;
@@ -81,9 +215,7 @@ export class BackgroundLocationRunner {
     const onUserGesture = () => {
       if (!this.isRunning) {
         this.start().then((ok) => {
-          if (ok) {
-            removeListeners();
-          }
+          if (ok) removeListeners();
         }).catch(() => {});
       } else {
         removeListeners();
@@ -116,24 +248,28 @@ export class BackgroundLocationRunner {
         await this.audio.play();
       }
 
-      // Configure Android / iOS Media Session notification
+      // Initialize secondary Web Audio API Oscillator
+      this.initAudioContext();
+
+      // Configure Android / iOS Media Session notification in the notification bar
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         navigator.mediaSession.metadata = new MediaMetadata({
           title: 'Nexus Family Tracker',
-          artist: '🟢 Background Location Active (Eco 10s)',
-          album: 'Family Safety',
+          artist: '🟢 Live Background Location Active (10s GPS)',
+          album: 'Family Safety & Sharing',
           artwork: [
             { src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' },
             { src: '/pwa-512x512.png', sizes: '512x512', type: 'image/png' }
           ]
         });
 
+        navigator.mediaSession.playbackState = 'playing';
+
         navigator.mediaSession.setActionHandler('play', () => {
           this.start();
         });
         navigator.mediaSession.setActionHandler('pause', () => {
-          // Keep active or restart
-          this.start();
+          this.start(); // Keep active
         });
         try {
           navigator.mediaSession.setActionHandler('stop', () => {
@@ -142,17 +278,22 @@ export class BackgroundLocationRunner {
         } catch {}
       }
 
-      // Setup Heartbeat Timer (fires every 15s to guarantee location updates)
-      if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = window.setInterval(() => {
+      // Start unthrottled Web Worker heartbeat
+      if (this.worker) {
+        this.worker.postMessage('START');
+      }
+
+      // Fallback main thread interval (every 10s)
+      if (this.fallbackInterval) clearInterval(this.fallbackInterval);
+      this.fallbackInterval = window.setInterval(() => {
         if (this.isRunning) {
-          // Double check audio is playing to keep background JS thread alive
-          if (this.audio && this.audio.paused) {
-            this.audio.play().catch(() => {});
-          }
+          this.ensureAudioPlaying();
           this.onHeartbeatCallback?.();
         }
-      }, 15000);
+      }, 10000);
+
+      // Pin Web Notification in Android status bar / notification drawer
+      notificationManager.showLiveTrackingNotification().catch(() => {});
 
       this.isRunning = true;
       try {
@@ -161,7 +302,7 @@ export class BackgroundLocationRunner {
       this.onStateChangeCallback?.(true);
       return true;
     } catch (err) {
-      console.warn('BackgroundRunner: Autoplay locked waiting for interaction:', err);
+      console.warn('BackgroundRunner: Waiting for first user touch to unlock audio session:', err);
       this.armGestureActivation();
       return false;
     }
@@ -170,9 +311,13 @@ export class BackgroundLocationRunner {
   public stop() {
     this.isRunning = false;
 
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
+    if (this.worker) {
+      this.worker.postMessage('STOP');
+    }
+
+    if (this.fallbackInterval) {
+      clearInterval(this.fallbackInterval);
+      this.fallbackInterval = null;
     }
 
     if (this.audio) {
@@ -181,6 +326,26 @@ export class BackgroundLocationRunner {
         this.audio.currentTime = 0;
       } catch {}
     }
+
+    if (this.oscillator) {
+      try {
+        this.oscillator.stop();
+        this.oscillator.disconnect();
+      } catch {}
+      this.oscillator = null;
+    }
+
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      try {
+        this.audioContext.suspend().catch(() => {});
+      } catch {}
+    }
+
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'none';
+    }
+
+    notificationManager.clearNotification().catch(() => {});
 
     try {
       localStorage.setItem('nexus_auto_bg', 'false');
