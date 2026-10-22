@@ -89,17 +89,12 @@ const MEMBER_AVATAR_KEY = 'nexus_member_avatar';
 const THEME_KEY = 'nexus_theme';
 
 const getDeviceId = () => {
-  let baseId = localStorage.getItem(DEVICE_ID_KEY);
-  if (!baseId) {
-    baseId = `usr_${Math.random().toString(36).substring(2, 8)}`;
-    localStorage.setItem(DEVICE_ID_KEY, baseId);
+  let id = localStorage.getItem(DEVICE_ID_KEY);
+  if (!id) {
+    id = `usr_${Math.random().toString(36).substring(2, 8)}`;
+    localStorage.setItem(DEVICE_ID_KEY, id);
   }
-  let tabId = sessionStorage.getItem(TAB_DEVICE_ID_KEY);
-  if (!tabId) {
-    tabId = `t${Math.random().toString(36).substring(2, 6)}`;
-    sessionStorage.setItem(TAB_DEVICE_ID_KEY, tabId);
-  }
-  return `${baseId}_${tabId}`;
+  return id;
 };
 
 export default function App() {
@@ -312,10 +307,10 @@ export default function App() {
     };
 
     setMembers(prev => {
-      const existingIdx = prev.findIndex(m => m.id === memberDocId || (baseId && m.id === `${currentCircle.id}_${baseId}`));
+      const existingIdx = prev.findIndex(m => m.id === memberDocId || (m.name && m.name === memberName));
       if (existingIdx >= 0) {
         const copy = [...prev];
-        copy[existingIdx] = { ...copy[existingIdx], ...selfItem, id: copy[existingIdx].id };
+        copy[existingIdx] = { ...copy[existingIdx], ...selfItem, id: memberDocId };
         return copy;
       } else {
         return [selfItem, ...prev];
@@ -324,7 +319,7 @@ export default function App() {
 
     // Auto-select self if no member or previous was self
     setSelectedMember(prev => {
-      if (!prev || prev.id === memberDocId || (baseId && prev.id === `${currentCircle.id}_${baseId}`)) {
+      if (!prev || prev.id === memberDocId || (prev.name && prev.name === memberName)) {
         return selfItem;
       }
       return prev;
@@ -332,12 +327,6 @@ export default function App() {
 
     try {
       await setDoc(doc(db, 'devices', memberDocId), payload, { merge: true });
-      // If user has an existing member document under baseId from earlier session, update it too
-      if (baseId && baseId !== deviceId) {
-        try {
-          await setDoc(doc(db, 'devices', `${currentCircle.id}_${baseId}`), payload, { merge: true });
-        } catch {}
-      }
     } catch (err) {
       console.warn('Location sync to firestore failed:', err);
     }
@@ -408,42 +397,64 @@ export default function App() {
     // Devices in circle listener
     const devicesQuery = query(collection(db, 'devices'), where('gridId', '==', currentCircle.id));
     const unsubDevices = onSnapshot(devicesQuery, (snap) => {
-      let list = snap.docs.map(d => ({ id: d.id, ...d.data() } as DeviceMember));
+      const rawList = snap.docs.map(d => ({ id: d.id, ...d.data() } as DeviceMember));
       
       const memberDocId = `${currentCircle.id}_${deviceId}`;
-      const baseId = localStorage.getItem(DEVICE_ID_KEY);
-      const baseDocId = baseId ? `${currentCircle.id}_${baseId}` : null;
 
-      // Ensure live device position is preserved in members list
-      if (currentCoords) {
-        const selfInList = list.find(m => m.id === memberDocId || (baseDocId && m.id === baseDocId));
-        if (selfInList) {
-          selfInList.lastLat = currentCoords.lat;
-          selfInList.lastLng = currentCoords.lng;
-          selfInList.lastUpdated = new Date();
-        } else {
-          list.unshift({
-            id: memberDocId,
-            name: memberName || 'You (Me)',
-            role: memberRole,
-            avatar: memberAvatar,
-            lastLat: currentCoords.lat,
-            lastLng: currentCoords.lng,
-            lastUpdated: new Date(),
-            gridId: currentCircle.id,
-            speed: currentSpeed,
-            accuracy: gpsAccuracy,
-            battery: currentBattery?.level || 100,
-            isCharging: currentBattery?.isCharging || false
-          });
-        }
+      // Deduplicate: If multiple docs in Firestore share the same ID or name, keep only ONE clean item
+      const seenIds = new Set<string>();
+      const seenNames = new Set<string>();
+      const list: DeviceMember[] = [];
+
+      // Give priority to the current user's document
+      const selfDoc = rawList.find(m => m.id === memberDocId || (m.name && m.name === memberName));
+      if (selfDoc) {
+        seenIds.add(selfDoc.id);
+        if (selfDoc.name) seenNames.add(selfDoc.name);
+        list.push({
+          ...selfDoc,
+          id: memberDocId,
+          name: memberName || selfDoc.name,
+          role: memberRole || selfDoc.role,
+          avatar: memberAvatar || selfDoc.avatar,
+          lastLat: currentCoords?.lat || selfDoc.lastLat,
+          lastLng: currentCoords?.lng || selfDoc.lastLng,
+          lastUpdated: new Date()
+        });
+      } else if (currentCoords) {
+        seenIds.add(memberDocId);
+        if (memberName) seenNames.add(memberName);
+        list.push({
+          id: memberDocId,
+          name: memberName || 'You (Me)',
+          role: memberRole,
+          avatar: memberAvatar,
+          lastLat: currentCoords.lat,
+          lastLng: currentCoords.lng,
+          lastUpdated: new Date(),
+          gridId: currentCircle.id,
+          speed: currentSpeed,
+          accuracy: gpsAccuracy,
+          battery: currentBattery?.level || 100,
+          isCharging: currentBattery?.isCharging || false
+        });
+      }
+
+      for (const m of rawList) {
+        if (m.id === memberDocId || (m.name && m.name === memberName)) continue;
+        if (seenIds.has(m.id)) continue;
+        if (m.name && seenNames.has(m.name)) continue;
+
+        seenIds.add(m.id);
+        if (m.name) seenNames.add(m.name);
+        list.push(m);
       }
 
       setMembers(list);
 
       // Default selected member to self
       setSelectedMember(prev => {
-        const selfMember = list.find(m => m.id === memberDocId || (baseDocId && m.id === baseDocId));
+        const selfMember = list.find(m => m.id === memberDocId);
         if (!prev) return selfMember || list[0] || null;
         const updated = list.find(m => m.id === prev.id);
         return updated || selfMember || list[0] || null;
@@ -494,10 +505,8 @@ export default function App() {
     if (currentCoords) {
       setMapFocusOverride({ lat: currentCoords.lat, lng: currentCoords.lng });
       // Also select self
-      const baseId = localStorage.getItem(DEVICE_ID_KEY);
       const selfMember = members.find(m => 
         m.id === `${currentCircle?.id}_${deviceId}` || 
-        (baseId && m.id === `${currentCircle?.id}_${baseId}`) || 
         m.id === 'demo-you'
       );
       if (selfMember) {
@@ -990,10 +999,8 @@ export default function App() {
     );
   }
 
-  const baseDeviceId = localStorage.getItem(DEVICE_ID_KEY);
   const currentMember = members.find(m => 
     m.id === `${currentCircle.id}_${deviceId}` || 
-    (baseDeviceId && m.id === `${currentCircle.id}_${baseDeviceId}`) || 
     m.id === 'demo-you'
   ) || null;
 
