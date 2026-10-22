@@ -268,8 +268,9 @@ export default function App() {
 
     const currentPlace = findCurrentPlace(res.lat, res.lng, safeZones);
     const memberDocId = `${currentCircle.id}_${deviceId}`;
+    const baseId = localStorage.getItem(DEVICE_ID_KEY);
 
-    const payload: Partial<DeviceMember> = {
+    const payload: Record<string, any> = {
       id: memberDocId,
       name: memberName || 'Family Member',
       role: memberRole,
@@ -279,20 +280,66 @@ export default function App() {
       lastUpdated: serverTimestamp(),
       gridId: currentCircle.id,
       speed: res.speed || 0,
-      accuracy: res.accuracy,
-      currentPlace: currentPlace ? currentPlace.name : undefined,
+      accuracy: res.accuracy || 10,
       isSharingPaused: isSharingPaused
     };
+
+    if (currentPlace?.name) {
+      payload.currentPlace = currentPlace.name;
+    }
 
     if (currentBattery) {
       payload.battery = currentBattery.level;
       payload.isCharging = currentBattery.isCharging;
     }
 
+    // Immediately update local members state with live position for zero-latency response!
+    const selfItem: DeviceMember = {
+      id: memberDocId,
+      name: memberName || 'Family Member',
+      role: memberRole,
+      avatar: memberAvatar,
+      lastLat: res.lat,
+      lastLng: res.lng,
+      lastUpdated: new Date(),
+      gridId: currentCircle.id,
+      speed: res.speed || 0,
+      accuracy: res.accuracy || 10,
+      currentPlace: currentPlace ? currentPlace.name : undefined,
+      battery: currentBattery?.level || 100,
+      isCharging: currentBattery?.isCharging || false,
+      isSharingPaused
+    };
+
+    setMembers(prev => {
+      const existingIdx = prev.findIndex(m => m.id === memberDocId || (baseId && m.id === `${currentCircle.id}_${baseId}`));
+      if (existingIdx >= 0) {
+        const copy = [...prev];
+        copy[existingIdx] = { ...copy[existingIdx], ...selfItem, id: copy[existingIdx].id };
+        return copy;
+      } else {
+        return [selfItem, ...prev];
+      }
+    });
+
+    // Auto-select self if no member or previous was self
+    setSelectedMember(prev => {
+      if (!prev || prev.id === memberDocId || (baseId && prev.id === `${currentCircle.id}_${baseId}`)) {
+        return selfItem;
+      }
+      return prev;
+    });
+
     try {
       await setDoc(doc(db, 'devices', memberDocId), payload, { merge: true });
+      // If user has an existing member document under baseId from earlier session, update it too
+      if (baseId && baseId !== deviceId) {
+        try {
+          await setDoc(doc(db, 'devices', `${currentCircle.id}_${baseId}`), payload, { merge: true });
+        } catch {}
+      }
     } catch (err) {
-      console.warn('Location sync to firestore skipped:', err);
+      console.warn('Location sync to firestore failed:', err);
     }
   }, [currentCircle, deviceId, memberName, memberRole, memberAvatar, safeZones, isDemoMode, isSharingPaused, currentBattery]);
 
@@ -312,13 +359,16 @@ export default function App() {
         try {
           const currentPlace = findCurrentPlace(currentCoords.lat, currentCoords.lng, safeZones);
           const memberDocId = `${currentCircle.id}_${deviceId}`;
-          await addDoc(collection(db, `devices/${memberDocId}/history`), {
+          const historyPayload: Record<string, any> = {
             lat: currentCoords.lat,
             lng: currentCoords.lng,
             timestamp: serverTimestamp(),
-            speed: currentSpeed,
-            placeName: currentPlace ? currentPlace.name : undefined
-          });
+            speed: currentSpeed
+          };
+          if (currentPlace?.name) {
+            historyPayload.placeName = currentPlace.name;
+          }
+          await addDoc(collection(db, `devices/${memberDocId}/history`), historyPayload);
         } catch {}
       }
     }, 30000);
@@ -358,12 +408,42 @@ export default function App() {
     // Devices in circle listener
     const devicesQuery = query(collection(db, 'devices'), where('gridId', '==', currentCircle.id));
     const unsubDevices = onSnapshot(devicesQuery, (snap) => {
-      const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as DeviceMember));
+      let list = snap.docs.map(d => ({ id: d.id, ...d.data() } as DeviceMember));
+      
+      const memberDocId = `${currentCircle.id}_${deviceId}`;
+      const baseId = localStorage.getItem(DEVICE_ID_KEY);
+      const baseDocId = baseId ? `${currentCircle.id}_${baseId}` : null;
+
+      // Ensure live device position is preserved in members list
+      if (currentCoords) {
+        const selfInList = list.find(m => m.id === memberDocId || (baseDocId && m.id === baseDocId));
+        if (selfInList) {
+          selfInList.lastLat = currentCoords.lat;
+          selfInList.lastLng = currentCoords.lng;
+          selfInList.lastUpdated = new Date();
+        } else {
+          list.unshift({
+            id: memberDocId,
+            name: memberName || 'You (Me)',
+            role: memberRole,
+            avatar: memberAvatar,
+            lastLat: currentCoords.lat,
+            lastLng: currentCoords.lng,
+            lastUpdated: new Date(),
+            gridId: currentCircle.id,
+            speed: currentSpeed,
+            accuracy: gpsAccuracy,
+            battery: currentBattery?.level || 100,
+            isCharging: currentBattery?.isCharging || false
+          });
+        }
+      }
+
       setMembers(list);
 
-      // If user has not selected a member, default to self or first member
+      // Default selected member to self
       setSelectedMember(prev => {
-        const selfMember = list.find(m => m.id === `${currentCircle.id}_${deviceId}`);
+        const selfMember = list.find(m => m.id === memberDocId || (baseDocId && m.id === baseDocId));
         if (!prev) return selfMember || list[0] || null;
         const updated = list.find(m => m.id === prev.id);
         return updated || selfMember || list[0] || null;
@@ -414,7 +494,12 @@ export default function App() {
     if (currentCoords) {
       setMapFocusOverride({ lat: currentCoords.lat, lng: currentCoords.lng });
       // Also select self
-      const selfMember = members.find(m => m.id === `${currentCircle?.id}_${deviceId}` || m.id === 'demo-you');
+      const baseId = localStorage.getItem(DEVICE_ID_KEY);
+      const selfMember = members.find(m => 
+        m.id === `${currentCircle?.id}_${deviceId}` || 
+        (baseId && m.id === `${currentCircle?.id}_${baseId}`) || 
+        m.id === 'demo-you'
+      );
       if (selfMember) {
         setSelectedMember(selfMember);
       }
@@ -905,7 +990,12 @@ export default function App() {
     );
   }
 
-  const currentMember = members.find(m => m.id === `${currentCircle.id}_${deviceId}` || m.id === 'demo-you') || null;
+  const baseDeviceId = localStorage.getItem(DEVICE_ID_KEY);
+  const currentMember = members.find(m => 
+    m.id === `${currentCircle.id}_${deviceId}` || 
+    (baseDeviceId && m.id === `${currentCircle.id}_${baseDeviceId}`) || 
+    m.id === 'demo-you'
+  ) || null;
 
   // Active map focus target
   const mapFocusTarget = mapFocusOverride || (selectedMember ? { lat: selectedMember.lastLat, lng: selectedMember.lastLng } : currentCoords);
@@ -1212,9 +1302,12 @@ export default function App() {
               onNavigateMember={(m) => setNavigatingMember(m)}
               safeZones={safeZones}
               history={history}
-              currentUserId={`${currentCircle.id}_${deviceId}`}
+              currentUserId={currentMember?.id || `${currentCircle.id}_${deviceId}`}
               focusLocation={mapFocusTarget}
               theme={theme}
+              currentCoords={currentCoords}
+              accuracy={gpsAccuracy}
+              currentUser={currentMember}
             />
           </div>
         </div>

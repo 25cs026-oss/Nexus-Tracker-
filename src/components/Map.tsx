@@ -32,6 +32,9 @@ interface MapProps {
   currentUserId?: string;
   focusLocation?: { lat: number; lng: number } | null;
   theme?: 'light' | 'dark' | 'midnight';
+  currentCoords?: { lat: number; lng: number } | null;
+  accuracy?: number;
+  currentUser?: DeviceMember | null;
 }
 
 // Tile Layer Providers
@@ -85,15 +88,20 @@ function getMemoizedFamilyIcon(
     ? '<div class="absolute -inset-2 rounded-full bg-red-500/40 animate-ping"></div>'
     : isSelected
       ? '<div class="absolute -inset-1 rounded-full bg-blue-500/30"></div>'
-      : '';
+      : isCurrentUser
+        ? '<div class="absolute -inset-1.5 rounded-full bg-emerald-500/35 animate-pulse"></div>'
+        : '';
 
   const statusBadge = isSos
     ? '<div class="absolute -top-1 -right-1 w-4 h-4 bg-red-600 rounded-full flex items-center justify-center text-[9px] text-white font-bold border-2 border-white">!</div>'
     : member.isCharging
       ? '<div class="absolute -top-1 -right-1 w-3.5 h-3.5 bg-amber-500 rounded-full flex items-center justify-center text-[8px] text-white border border-white">⚡</div>'
-      : isOnline
+      : isOnline || isCurrentUser
         ? '<div class="absolute -top-0.5 -right-0.5 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white"></div>'
         : '';
+
+  const displayName = isCurrentUser ? `${member.name || 'You'} (You)` : (member.name || 'Member');
+  const badgeBg = isCurrentUser ? 'bg-emerald-700' : 'bg-slate-900/85';
 
   const html = `
     <div class="relative group cursor-pointer flex flex-col items-center select-none" style="will-change: transform;">
@@ -105,8 +113,8 @@ function getMemoizedFamilyIcon(
         <span>${avatar}</span>
         ${statusBadge}
       </div>
-      <div class="mt-1 px-2 py-0.5 bg-slate-900/85 backdrop-blur-xs text-white text-[10px] font-semibold rounded-full shadow-sm whitespace-nowrap pointer-events-none flex items-center gap-1 border border-white/20">
-        <span>${member.name || 'Member'}</span>
+      <div class="mt-1 px-2.5 py-0.5 ${badgeBg} backdrop-blur-xs text-white text-[10px] font-bold rounded-full shadow-sm whitespace-nowrap pointer-events-none flex items-center gap-1 border border-white/20">
+        <span>${displayName}</span>
         ${member.battery !== undefined ? `<span class="opacity-80">(${member.battery}%)</span>` : ''}
       </div>
     </div>
@@ -201,7 +209,10 @@ export const Map: React.FC<MapProps> = ({
   safeZones,
   history,
   currentUserId,
-  focusLocation
+  focusLocation,
+  currentCoords,
+  accuracy,
+  currentUser
 }) => {
   const [activeLayer, setActiveLayer] = useState<'streets' | 'satellite' | 'dark'>('streets');
   const [showLayerMenu, setShowLayerMenu] = useState(false);
@@ -277,10 +288,49 @@ export const Map: React.FC<MapProps> = ({
           />
         )}
 
+        {/* Live GPS Accuracy Halo around User's Real Location */}
+        {currentCoords && (
+          <Circle
+            center={[currentCoords.lat, currentCoords.lng]}
+            radius={Math.max(accuracy || 30, 25)}
+            pathOptions={{
+              color: '#10b981',
+              fillColor: '#34d399',
+              fillOpacity: 0.16,
+              weight: 1.5,
+              dashArray: '4, 6'
+            }}
+          />
+        )}
+
+        {/* Fallback Live User Pin if members list hasn't populated yet */}
+        {currentCoords && !members.some(m => m.id === currentUserId || (Boolean(currentUserId) && (currentUserId.includes(m.id) || m.id.includes(currentUserId)))) && (
+          <Marker
+            position={[currentCoords.lat, currentCoords.lng]}
+            icon={L.divIcon({
+              className: 'custom-live-user-marker',
+              html: `
+                <div class="relative flex flex-col items-center select-none" style="will-change: transform;">
+                  <div class="absolute -inset-2 rounded-full bg-emerald-500/40 animate-ping"></div>
+                  <div class="w-10 h-10 rounded-full bg-white border-2 border-emerald-500 shadow-lg flex items-center justify-center text-lg">
+                    <span>${currentUser?.avatar || '📍'}</span>
+                    <div class="absolute -top-0.5 -right-0.5 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white"></div>
+                  </div>
+                  <div class="mt-1 px-2.5 py-0.5 bg-emerald-700 text-white text-[10px] font-bold rounded-full shadow border border-white/20 whitespace-nowrap">
+                    ${currentUser?.name || 'You'} (Live GPS)
+                  </div>
+                </div>
+              `,
+              iconSize: [44, 56],
+              iconAnchor: [22, 28]
+            })}
+          />
+        )}
+
         {/* Family Member Markers */}
         {members.map(member => {
           const isSelected = selectedMember?.id === member.id;
-          const isCurrentUser = member.id === currentUserId;
+          const isCurrentUser = member.id === currentUserId || (Boolean(currentUserId) && (currentUserId.includes(member.id) || member.id.includes(currentUserId)));
           const icon = getMemoizedFamilyIcon(member, isSelected, isCurrentUser);
 
           return (
