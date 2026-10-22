@@ -1,7 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { MemberRole } from '../types';
+import { MemberRole, SavedCircleSummary } from '../types';
 import { geoService, GeoLocationResult } from '../utils/geolocation';
-import { Users, Plus, KeyRound, Sparkles, MapPin, ArrowRight } from 'lucide-react';
+import { 
+  Users, 
+  Plus, 
+  KeyRound, 
+  Sparkles, 
+  MapPin, 
+  ArrowRight, 
+  Clock, 
+  Trash2, 
+  ChevronRight,
+  UserCheck
+} from 'lucide-react';
 
 interface OnboardingModalProps {
   onJoinCircle: (pin: string, name: string, role: MemberRole, avatar: string) => Promise<boolean>;
@@ -10,6 +21,9 @@ interface OnboardingModalProps {
   defaultName: string;
   defaultRole: MemberRole;
   defaultAvatar: string;
+  savedCircles?: SavedCircleSummary[];
+  onSelectSavedCircle?: (circleId: string) => void;
+  onRemoveSavedCircle?: (circleId: string) => void;
 }
 
 const AVATARS = ['👩', '👨', '👧', '👦', '🧑', '👵', '👴', '🐶', '🚗'];
@@ -21,7 +35,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   onStartDemo,
   defaultName,
   defaultRole,
-  defaultAvatar
+  defaultAvatar,
+  savedCircles = [],
+  onSelectSavedCircle,
+  onRemoveSavedCircle
 }) => {
   const [tab, setTab] = useState<'join' | 'create'>('join');
   const [pin, setPin] = useState('');
@@ -29,14 +46,23 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [memberName, setMemberName] = useState(defaultName || '');
   const [role, setRole] = useState<MemberRole>(defaultRole || 'Mom');
   const [avatar, setAvatar] = useState(defaultAvatar || '👩');
+  const [isEditingProfile, setIsEditingProfile] = useState<boolean>(!defaultName);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [locationDetected, setLocationDetected] = useState<boolean>(false);
 
+  // Sync if defaultName changes
+  useEffect(() => {
+    if (defaultName && !memberName) {
+      setMemberName(defaultName);
+      setIsEditingProfile(false);
+    }
+  }, [defaultName]);
+
   // Pre-seed live location acquisition as soon as onboarding is opened
   useEffect(() => {
     geoService.startTracking(
-      (pos: GeoLocationResult) => {
+      (_pos: GeoLocationResult) => {
         setLocationDetected(true);
       },
       () => {}
@@ -59,14 +85,16 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
       setError('Please enter a 6-digit circle code');
       return;
     }
-    if (!memberName.trim()) {
+    const finalName = memberName.trim() || defaultName.trim();
+    if (!finalName) {
+      setIsEditingProfile(true);
       setError('Please enter your name');
       return;
     }
 
     setLoading(true);
     try {
-      const success = await onJoinCircle(pin.trim().toUpperCase(), memberName.trim(), role, avatar);
+      const success = await onJoinCircle(pin.trim().toUpperCase(), finalName, role, avatar);
       if (!success) {
         setError('Circle code not found. Check the code or create a new circle!');
       }
@@ -84,7 +112,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
       setError('Please provide a name for your Family Circle');
       return;
     }
-    if (!memberName.trim()) {
+    const finalName = memberName.trim() || defaultName.trim();
+    if (!finalName) {
+      setIsEditingProfile(true);
       setError('Please enter your name');
       return;
     }
@@ -93,7 +123,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
     setLoading(true);
     try {
-      const success = await onCreateCircle(circleName.trim(), circlePin, memberName.trim(), role, avatar);
+      const success = await onCreateCircle(circleName.trim(), circlePin, finalName, role, avatar);
       if (!success) {
         setError('Failed to initialize circle. Please try again.');
       }
@@ -126,8 +156,70 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           </div>
         </div>
 
+        {/* Previously Joined Circles Quick List */}
+        {savedCircles.length > 0 && onSelectSavedCircle && (
+          <div className="mb-5 p-3.5 bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-800 rounded-2xl">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider flex items-center gap-1">
+                <Clock className="w-3.5 h-3.5 text-blue-500" />
+                Previous Circles ({savedCircles.length})
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              {savedCircles.map((circle) => (
+                <div
+                  key={circle.id}
+                  className="flex items-center justify-between p-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200/60 dark:border-slate-700/60 hover:border-blue-300 transition-all group"
+                >
+                  <button
+                    type="button"
+                    onClick={() => onSelectSavedCircle(circle.id)}
+                    className="flex-1 flex items-center gap-2 text-left min-w-0"
+                  >
+                    <div className="w-7 h-7 rounded-lg bg-blue-100 dark:bg-blue-950 text-blue-600 dark:text-blue-400 font-bold flex items-center justify-center text-xs shrink-0">
+                      {circle.name ? circle.name.charAt(0).toUpperCase() : 'C'}
+                    </div>
+                    <div className="truncate">
+                      <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">
+                        {circle.name}
+                      </div>
+                      <div className="text-[10px] text-slate-400 font-mono">
+                        PIN: {circle.id}
+                      </div>
+                    </div>
+                  </button>
+
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => onSelectSavedCircle(circle.id)}
+                      className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 dark:bg-blue-950 dark:hover:bg-blue-900 text-blue-600 dark:text-blue-400 rounded-lg text-[11px] font-bold flex items-center gap-1"
+                    >
+                      <span>Open</span>
+                      <ChevronRight className="w-3 h-3" />
+                    </button>
+                    {onRemoveSavedCircle && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRemoveSavedCircle(circle.id);
+                        }}
+                        title="Remove from saved circles"
+                        className="p-1 text-slate-400 hover:text-red-500 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Tab Switcher */}
-        <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl mb-6">
+        <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl mb-5">
           <button
             type="button"
             onClick={() => {
@@ -188,60 +280,102 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               </div>
             </div>
 
-            {/* Profile Inputs */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                Your Name
-              </label>
-              <input
-                type="text"
-                required
-                value={memberName}
-                onChange={(e) => setMemberName(e.target.value)}
-                placeholder="e.g. Mom, Alex, Dad"
-                className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            {/* Avatar & Role */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 mb-1.5">
-                Pick Your Avatar & Role
-              </label>
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {AVATARS.map((av) => (
-                  <button
-                    type="button"
-                    key={av}
-                    onClick={() => setAvatar(av)}
-                    className={`text-lg p-1.5 rounded-xl border transition-all ${
-                      avatar === av
-                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 scale-110 shadow-xs'
-                        : 'border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
-                    }`}
-                  >
-                    {av}
-                  </button>
-                ))}
+            {/* Smart Profile Display or Editor */}
+            {!isEditingProfile && memberName.trim() ? (
+              <div className="p-3 bg-slate-50 dark:bg-slate-800/80 rounded-2xl border border-slate-200/90 dark:border-slate-700/80 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl p-1 bg-white dark:bg-slate-700 rounded-xl shadow-xs">
+                    {avatar}
+                  </span>
+                  <div>
+                    <div className="text-[10px] text-slate-400 font-medium flex items-center gap-1">
+                      <UserCheck className="w-3 h-3 text-emerald-500" />
+                      <span>Joining with profile:</span>
+                    </div>
+                    <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5 mt-0.5">
+                      <span>{memberName}</span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 font-semibold border border-blue-200 dark:border-blue-900">
+                        {role}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingProfile(true)}
+                  className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline px-2 py-1"
+                >
+                  Change
+                </button>
               </div>
+            ) : (
+              <div className="space-y-3.5 p-3.5 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-slate-200/80 dark:border-slate-800">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Your Profile
+                  </label>
+                  {memberName.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingProfile(false)}
+                      className="text-[11px] font-semibold text-slate-500 hover:underline"
+                    >
+                      Save Profile
+                    </button>
+                  )}
+                </div>
 
-              <div className="flex flex-wrap gap-1">
-                {ROLES.map((r) => (
-                  <button
-                    type="button"
-                    key={r}
-                    onClick={() => setRole(r)}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
-                      role === r
-                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400'
-                        : 'border-slate-200 dark:border-slate-800 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
-                    }`}
-                  >
-                    {r}
-                  </button>
-                ))}
+                <div>
+                  <input
+                    type="text"
+                    required
+                    value={memberName}
+                    onChange={(e) => setMemberName(e.target.value)}
+                    placeholder="Enter your name (e.g. Dad, Mom, Alex)"
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-500 mb-1.5">
+                    Pick Avatar & Role
+                  </label>
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {AVATARS.map((av) => (
+                      <button
+                        type="button"
+                        key={av}
+                        onClick={() => setAvatar(av)}
+                        className={`text-lg p-1.5 rounded-xl border transition-all ${
+                          avatar === av
+                            ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 scale-110 shadow-xs'
+                            : 'border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        {av}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-wrap gap-1">
+                    {ROLES.map((r) => (
+                      <button
+                        type="button"
+                        key={r}
+                        onClick={() => setRole(r)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
+                          role === r
+                            ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400'
+                            : 'border-slate-200 dark:border-slate-800 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        {r}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
 
             <button
               type="submit"
@@ -293,59 +427,102 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                Your Name
-              </label>
-              <input
-                type="text"
-                required
-                value={memberName}
-                onChange={(e) => setMemberName(e.target.value)}
-                placeholder="e.g. Dad, Mom, Emma"
-                className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            {/* Avatar & Role */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 mb-1.5">
-                Pick Your Avatar & Role
-              </label>
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {AVATARS.map((av) => (
-                  <button
-                    type="button"
-                    key={av}
-                    onClick={() => setAvatar(av)}
-                    className={`text-lg p-1.5 rounded-xl border transition-all ${
-                      avatar === av
-                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 scale-110 shadow-xs'
-                        : 'border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
-                    }`}
-                  >
-                    {av}
-                  </button>
-                ))}
+            {/* Smart Profile Display or Editor */}
+            {!isEditingProfile && memberName.trim() ? (
+              <div className="p-3 bg-slate-50 dark:bg-slate-800/80 rounded-2xl border border-slate-200/90 dark:border-slate-700/80 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl p-1 bg-white dark:bg-slate-700 rounded-xl shadow-xs">
+                    {avatar}
+                  </span>
+                  <div>
+                    <div className="text-[10px] text-slate-400 font-medium flex items-center gap-1">
+                      <UserCheck className="w-3 h-3 text-emerald-500" />
+                      <span>Creating as:</span>
+                    </div>
+                    <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5 mt-0.5">
+                      <span>{memberName}</span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 font-semibold border border-blue-200 dark:border-blue-900">
+                        {role}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingProfile(true)}
+                  className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline px-2 py-1"
+                >
+                  Change
+                </button>
               </div>
+            ) : (
+              <div className="space-y-3.5 p-3.5 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-slate-200/80 dark:border-slate-800">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Your Profile
+                  </label>
+                  {memberName.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingProfile(false)}
+                      className="text-[11px] font-semibold text-slate-500 hover:underline"
+                    >
+                      Save Profile
+                    </button>
+                  )}
+                </div>
 
-              <div className="flex flex-wrap gap-1">
-                {ROLES.map((r) => (
-                  <button
-                    type="button"
-                    key={r}
-                    onClick={() => setRole(r)}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
-                      role === r
-                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400'
-                        : 'border-slate-200 dark:border-slate-800 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
-                    }`}
-                  >
-                    {r}
-                  </button>
-                ))}
+                <div>
+                  <input
+                    type="text"
+                    required
+                    value={memberName}
+                    onChange={(e) => setMemberName(e.target.value)}
+                    placeholder="Enter your name (e.g. Dad, Mom, Emma)"
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-500 mb-1.5">
+                    Pick Avatar & Role
+                  </label>
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {AVATARS.map((av) => (
+                      <button
+                        type="button"
+                        key={av}
+                        onClick={() => setAvatar(av)}
+                        className={`text-lg p-1.5 rounded-xl border transition-all ${
+                          avatar === av
+                            ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 scale-110 shadow-xs'
+                            : 'border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        {av}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-wrap gap-1">
+                    {ROLES.map((r) => (
+                      <button
+                        type="button"
+                        key={r}
+                        onClick={() => setRole(r)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
+                          role === r
+                            ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400'
+                            : 'border-slate-200 dark:border-slate-800 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        {r}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
 
             <button
               type="submit"
@@ -359,7 +536,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         )}
 
         {/* Instant Demo Preview Option */}
-        <div className="mt-6 pt-5 border-t border-slate-100 dark:border-slate-800 text-center">
+        <div className="mt-5 pt-4 border-t border-slate-100 dark:border-slate-800 text-center">
           <button
             type="button"
             onClick={onStartDemo}
@@ -368,7 +545,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             <Sparkles className="w-4 h-4 text-amber-500" />
             <span>Try Instant Demo Circle (No Setup Needed)</span>
           </button>
-          <p className="text-[11px] text-slate-400 mt-2">
+          <p className="text-[11px] text-slate-400 mt-1.5">
             Experience real-time family tracking centered on your city.
           </p>
         </div>

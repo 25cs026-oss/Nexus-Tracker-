@@ -67,5 +67,14 @@ export interface SystemLog {
   type: 'info' | 'warning' | 'error' | 'success';
 }
 
+export interface SavedCircleSummary {
+  id: string; // The PIN
+  name: string;
+  joinedAt: string;
+  role?: MemberRole;
+  avatar?: string;
+  memberName?: string;
+}
+
 export type ActiveTab = 'map' | 'members' | 'places' | 'history' | 'checkins';
 export type AppTheme = 'light' | 'dark' | 'midnight';

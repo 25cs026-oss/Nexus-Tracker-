@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { MemberRole, AppTheme } from '../types';
+import { MemberRole, AppTheme, SavedCircleSummary } from '../types';
 import { 
   Settings, 
   User, 
@@ -31,6 +31,8 @@ interface SettingsModalProps {
   onToggleSharingPaused: (paused: boolean) => Promise<void>;
   onThemeChange: (theme: AppTheme) => void;
   onLeaveCircle: () => void;
+  savedCircles?: SavedCircleSummary[];
+  onSelectSavedCircle?: (circleId: string) => void;
 }
 
 const AVATAR_OPTIONS = ['👩', '👨', '👧', '👦', '🧑', '👵', '👴', '🐶', '🐱', '🚗', '🚲', '⭐'];
@@ -49,7 +51,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onUpdateProfile,
   onToggleSharingPaused,
   onThemeChange,
-  onLeaveCircle
+  onLeaveCircle,
+  savedCircles = [],
+  onSelectSavedCircle
 }) => {
   const [name, setName] = useState(memberName);
   const [role, setRole] = useState<MemberRole>(memberRole);
@@ -305,7 +309,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
           </div>
 
-          {/* 5. Theme Toggle */}
+          {/* 5. Saved Circles Switcher */}
+          {savedCircles && savedCircles.length > 0 && onSelectSavedCircle && (
+            <div className="p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800">
+              <span className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-2">
+                Your Circles ({savedCircles.length})
+              </span>
+              <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                {savedCircles.map((c) => {
+                  const isActive = c.id === circlePin;
+                  return (
+                    <div
+                      key={c.id}
+                      className={`flex items-center justify-between p-2 rounded-xl text-xs transition-colors ${
+                        isActive
+                          ? 'bg-blue-50 dark:bg-blue-950/60 border border-blue-200 dark:border-blue-900 text-blue-700 dark:text-blue-300 font-bold'
+                          : 'bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200'
+                      }`}
+                    >
+                      <div className="truncate pr-2">
+                        <div className="truncate font-semibold">{c.name}</div>
+                        <div className="text-[10px] text-slate-400 font-mono">PIN: {c.id}</div>
+                      </div>
+                      {isActive ? (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300">
+                          Active
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelectSavedCircle(c.id);
+                            onClose();
+                          }}
+                          className="px-2.5 py-1 bg-white dark:bg-slate-700 hover:bg-blue-600 hover:text-white rounded-lg text-[11px] font-semibold border border-slate-200 dark:border-slate-600 transition-colors shadow-xs"
+                        >
+                          Switch
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* 6. Theme Toggle */}
           <div className="flex items-center justify-between p-3 rounded-2xl border border-slate-200 dark:border-slate-800">
             <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
               Appearance

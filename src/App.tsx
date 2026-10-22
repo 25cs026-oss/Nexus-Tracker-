@@ -12,7 +12,8 @@ import {
   HistoryPoint, 
   MemberRole, 
   AppTheme,
-  ActiveTab
+  ActiveTab,
+  SavedCircleSummary
 } from './types';
 import { 
   db, 
@@ -72,24 +73,33 @@ import {
   Plus, 
   Sparkles,
   Crosshair,
-  LocateFixed
+  LocateFixed,
+  ChevronDown,
+  CheckCircle2
 } from 'lucide-react';
 
 const DEVICE_ID_KEY = 'nexus_device_id';
+const TAB_DEVICE_ID_KEY = 'nexus_tab_id';
 const CIRCLE_PIN_KEY = 'nexus_circle_pin';
 const CIRCLE_DATA_KEY = 'nexus_circle_data';
+const SAVED_CIRCLES_KEY = 'nexus_saved_circles';
 const MEMBER_NAME_KEY = 'nexus_member_name';
 const MEMBER_ROLE_KEY = 'nexus_member_role';
 const MEMBER_AVATAR_KEY = 'nexus_member_avatar';
 const THEME_KEY = 'nexus_theme';
 
 const getDeviceId = () => {
-  let id = localStorage.getItem(DEVICE_ID_KEY);
-  if (!id) {
-    id = `usr_${Math.random().toString(36).substring(2, 10)}`;
-    localStorage.setItem(DEVICE_ID_KEY, id);
+  let baseId = localStorage.getItem(DEVICE_ID_KEY);
+  if (!baseId) {
+    baseId = `usr_${Math.random().toString(36).substring(2, 8)}`;
+    localStorage.setItem(DEVICE_ID_KEY, baseId);
   }
-  return id;
+  let tabId = sessionStorage.getItem(TAB_DEVICE_ID_KEY);
+  if (!tabId) {
+    tabId = `t${Math.random().toString(36).substring(2, 6)}`;
+    sessionStorage.setItem(TAB_DEVICE_ID_KEY, tabId);
+  }
+  return `${baseId}_${tabId}`;
 };
 
 export default function App() {
@@ -105,6 +115,23 @@ export default function App() {
     const saved = localStorage.getItem(CIRCLE_DATA_KEY);
     return saved ? JSON.parse(saved) : null;
   });
+  const [savedCircles, setSavedCircles] = useState<SavedCircleSummary[]>(() => {
+    try {
+      const raw = localStorage.getItem(SAVED_CIRCLES_KEY);
+      if (raw) return JSON.parse(raw);
+      const singleData = localStorage.getItem(CIRCLE_DATA_KEY);
+      if (singleData) {
+        const parsed = JSON.parse(singleData);
+        return [{
+          id: parsed.id,
+          name: parsed.name,
+          joinedAt: new Date().toISOString()
+        }];
+      }
+    } catch {}
+    return [];
+  });
+  const [showCircleSwitcher, setShowCircleSwitcher] = useState<boolean>(false);
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>('map');
   const [copiedCode, setCopiedCode] = useState(false);
@@ -461,6 +488,109 @@ export default function App() {
     }, 8000);
   };
 
+  // Saved Circles Helper Methods
+  const saveCircleToStorage = useCallback((circle: GridCircle, role?: MemberRole, avatar?: string, name?: string) => {
+    setSavedCircles(prev => {
+      const existingIndex = prev.findIndex(c => c.id === circle.id);
+      const item: SavedCircleSummary = {
+        id: circle.id,
+        name: circle.name,
+        joinedAt: new Date().toISOString(),
+        role: role || memberRole,
+        avatar: avatar || memberAvatar,
+        memberName: name || memberName
+      };
+      let updated: SavedCircleSummary[];
+      if (existingIndex >= 0) {
+        updated = [...prev];
+        updated[existingIndex] = { ...updated[existingIndex], ...item };
+      } else {
+        updated = [item, ...prev];
+      }
+      try {
+        localStorage.setItem(SAVED_CIRCLES_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  }, [memberRole, memberAvatar, memberName]);
+
+  const handleSelectSavedCircle = useCallback(async (circleId: string) => {
+    if (circleId === DEMO_PIN) {
+      startDemoCircle();
+      return;
+    }
+
+    try {
+      const circleDoc = await getDoc(doc(db, 'grids', circleId));
+      let circleData: GridCircle;
+
+      if (circleDoc.exists()) {
+        circleData = circleDoc.data() as GridCircle;
+      } else {
+        const q = query(collection(db, 'grids'), where('id', '==', circleId));
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          circleData = snap.docs[0].data() as GridCircle;
+        } else {
+          const found = savedCircles.find(c => c.id === circleId);
+          circleData = {
+            id: circleId,
+            name: found?.name || `Circle ${circleId}`,
+            createdAt: new Date().toISOString(),
+            safeZones: []
+          };
+        }
+      }
+
+      localStorage.setItem(CIRCLE_PIN_KEY, circleId);
+      localStorage.setItem(CIRCLE_DATA_KEY, JSON.stringify(circleData));
+      setCurrentCircle(circleData);
+      setIsDemoMode(false);
+      saveCircleToStorage(circleData);
+
+      let userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat;
+      let userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng;
+      if (!userLat || !userLng) {
+        const ip = await geoService.getFastIpLocation();
+        userLat = ip?.lat || 19.0760;
+        userLng = ip?.lng || 72.8777;
+      }
+
+      const memberDocId = `${circleId}_${deviceId}`;
+      await setDoc(doc(db, 'devices', memberDocId), {
+        id: memberDocId,
+        name: memberName || 'Family Member',
+        role: memberRole,
+        avatar: memberAvatar,
+        lastLat: userLat,
+        lastLng: userLng,
+        lastUpdated: serverTimestamp(),
+        gridId: circleId,
+        battery: currentBattery?.level || 100,
+        isCharging: currentBattery?.isCharging || false
+      }, { merge: true });
+
+      setMapFocusOverride({ lat: userLat, lng: userLng });
+    } catch (err) {
+      console.warn('Could not connect to circle:', err);
+    }
+  }, [deviceId, memberName, memberRole, memberAvatar, currentCoords, currentBattery, savedCircles, saveCircleToStorage]);
+
+  const handleRemoveSavedCircle = useCallback((circleId: string) => {
+    setSavedCircles(prev => {
+      const updated = prev.filter(c => c.id !== circleId);
+      try {
+        localStorage.setItem(SAVED_CIRCLES_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+    if (currentCircle?.id === circleId) {
+      localStorage.removeItem(CIRCLE_PIN_KEY);
+      localStorage.removeItem(CIRCLE_DATA_KEY);
+      setCurrentCircle(null);
+    }
+  }, [currentCircle?.id]);
+
   // Join Circle Handler (Uses live location, NOT San Francisco!)
   const handleJoinCircle = async (
     pin: string, 
@@ -497,6 +627,7 @@ export default function App() {
       setMemberAvatar(avatar);
       setCurrentCircle(circleData);
       setIsDemoMode(false);
+      saveCircleToStorage(circleData, role, avatar, name);
 
       // Determine real live coordinates
       let userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat;
@@ -571,6 +702,7 @@ export default function App() {
       setCurrentCircle(newCircle);
       setSafeZones(newCircle.safeZones || []);
       setIsDemoMode(false);
+      saveCircleToStorage(newCircle, role, avatar, creatorName);
 
       const memberDocId = `${pin}_${deviceId}`;
       await setDoc(doc(db, 'devices', memberDocId), {
@@ -766,6 +898,9 @@ export default function App() {
         defaultName={memberName}
         defaultRole={memberRole}
         defaultAvatar={memberAvatar}
+        savedCircles={savedCircles}
+        onSelectSavedCircle={handleSelectSavedCircle}
+        onRemoveSavedCircle={handleRemoveSavedCircle}
       />
     );
   }
@@ -780,42 +915,104 @@ export default function App() {
       {/* Top Application Header */}
       <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xs border-b border-slate-200/90 dark:border-slate-800 px-4 py-2.5">
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
-          {/* Left: Circle Name & Code */}
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 text-white flex items-center justify-center font-bold text-lg shadow-xs shadow-blue-500/20 shrink-0">
-              <Users className="w-5 h-5" />
-            </div>
-
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="font-extrabold text-slate-900 dark:text-white text-base leading-tight">
-                  {currentCircle.name}
-                </h1>
-                {isDemoMode && (
-                  <span className="text-[10px] bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
-                    <Sparkles className="w-3 h-3" />
-                    Demo
-                  </span>
-                )}
+          {/* Left: Circle Name & Code with Dropdown Switcher */}
+          <div className="relative">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 text-white flex items-center justify-center font-bold text-lg shadow-xs shadow-blue-500/20 shrink-0">
+                <Users className="w-5 h-5" />
               </div>
 
-              {/* Circle PIN Pill */}
-              <button
-                onClick={handleCopyCode}
-                className="mt-0.5 inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 group"
-                title="Copy Circle Code"
-              >
-                <span>Code:</span>
-                <span className="font-mono font-bold text-slate-800 dark:text-slate-200 tracking-wider">
-                  {currentCircle.id}
-                </span>
-                {copiedCode ? (
-                  <Check className="w-3 h-3 text-emerald-500" />
-                ) : (
-                  <Copy className="w-3 h-3 text-slate-400 group-hover:text-slate-600" />
-                )}
-              </button>
+              <div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowCircleSwitcher(!showCircleSwitcher)}
+                    className="font-extrabold text-slate-900 dark:text-white text-base leading-tight hover:text-blue-600 dark:hover:text-blue-400 flex items-center gap-1.5 transition-colors group text-left"
+                    title="Click to Switch Circle"
+                  >
+                    <span>{currentCircle.name}</span>
+                    <ChevronDown className={`w-4 h-4 text-slate-400 group-hover:text-blue-500 transition-transform ${showCircleSwitcher ? 'rotate-180' : ''}`} />
+                  </button>
+                  {isDemoMode && (
+                    <span className="text-[10px] bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
+                      <Sparkles className="w-3 h-3" />
+                      Demo
+                    </span>
+                  )}
+                </div>
+
+                {/* Circle PIN Pill */}
+                <button
+                  onClick={handleCopyCode}
+                  className="mt-0.5 inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 group"
+                  title="Copy Circle Code"
+                >
+                  <span>Code:</span>
+                  <span className="font-mono font-bold text-slate-800 dark:text-slate-200 tracking-wider">
+                    {currentCircle.id}
+                  </span>
+                  {copiedCode ? (
+                    <Check className="w-3 h-3 text-emerald-500" />
+                  ) : (
+                    <Copy className="w-3 h-3 text-slate-400 group-hover:text-slate-600" />
+                  )}
+                </button>
+              </div>
             </div>
+
+            {/* Circle Switcher Dropdown */}
+            {showCircleSwitcher && (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setShowCircleSwitcher(false)}
+                />
+                <div className="absolute top-full left-0 mt-2 z-50 w-72 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl overflow-hidden p-2 text-xs">
+                  <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider text-[10px]">
+                    <span>Your Circles</span>
+                    <span>{savedCircles.length} Saved</span>
+                  </div>
+
+                  <div className="max-h-56 overflow-y-auto py-1 space-y-1">
+                    {savedCircles.map(c => {
+                      const isActive = c.id === currentCircle.id;
+                      return (
+                        <button
+                          key={c.id}
+                          onClick={() => {
+                            setShowCircleSwitcher(false);
+                            if (!isActive) handleSelectSavedCircle(c.id);
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all text-left ${
+                            isActive
+                              ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-bold'
+                              : 'hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                          }`}
+                        >
+                          <div className="truncate pr-2">
+                            <div className="truncate font-semibold">{c.name}</div>
+                            <div className="text-[10px] text-slate-400 font-mono">PIN: {c.id}</div>
+                          </div>
+                          {isActive && <Check className="w-4 h-4 text-blue-600 shrink-0" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex flex-col gap-1">
+                    <button
+                      onClick={() => {
+                        setShowCircleSwitcher(false);
+                        setCurrentCircle(null);
+                      }}
+                      className="w-full py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Join or Create Circle</span>
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Right: Actions */}
@@ -1234,6 +1431,8 @@ export default function App() {
         }}
         onThemeChange={(newTheme) => setTheme(newTheme)}
         onLeaveCircle={handleLeaveCircle}
+        savedCircles={savedCircles}
+        onSelectSavedCircle={handleSelectSavedCircle}
       />
     </div>
   );
