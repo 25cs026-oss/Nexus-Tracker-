@@ -57,6 +57,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { TripTimeline } from './components/TripTimeline';
 import { OnboardingModal } from './components/OnboardingModal';
 import { NavigationModal } from './components/NavigationModal';
+import { InstallAppModal } from './components/InstallAppModal';
 
 import { 
   Users, 
@@ -75,7 +76,10 @@ import {
   Crosshair,
   LocateFixed,
   ChevronDown,
-  CheckCircle2
+  CheckCircle2,
+  Download,
+  Smartphone,
+  Sun
 } from 'lucide-react';
 
 const DEVICE_ID_KEY = 'nexus_device_id';
@@ -155,7 +159,68 @@ export default function App() {
   const [showSosModal, setShowSosModal] = useState(false);
   const [showCheckInModal, setShowCheckInModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showInstallModal, setShowInstallModal] = useState(false);
   const [navigatingMember, setNavigatingMember] = useState<DeviceMember | null>(null);
+
+  // PWA & Mobile Installation State
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [isAppInstalled, setIsAppInstalled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone === true;
+  });
+
+  // Screen WakeLock (Trip Mode - Keeps phone screen awake while tracking)
+  const [isWakeLockActive, setIsWakeLockActive] = useState<boolean>(false);
+  const wakeLockRef = useRef<any>(null);
+
+  // Listen for native PWA installation event
+  useEffect(() => {
+    const handleBeforeInstall = (e: Event) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+
+    const handleAppInstalled = () => {
+      setIsAppInstalled(true);
+      setDeferredPrompt(null);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstall);
+    window.addEventListener('appinstalled', handleAppInstalled);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
+  }, []);
+
+  // Screen WakeLock Toggle (Trip Mode)
+  const toggleWakeLock = async () => {
+    if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) {
+      alert('Screen Wake Lock is not supported on this browser. Keeping screen awake requires Chrome or an installed PWA.');
+      return;
+    }
+
+    try {
+      if (isWakeLockActive) {
+        if (wakeLockRef.current) {
+          await wakeLockRef.current.release();
+          wakeLockRef.current = null;
+        }
+        setIsWakeLockActive(false);
+      } else {
+        const lock = await (navigator as any).wakeLock.request('screen');
+        wakeLockRef.current = lock;
+        setIsWakeLockActive(true);
+        lock.addEventListener('release', () => {
+          setIsWakeLockActive(false);
+          wakeLockRef.current = null;
+        });
+      }
+    } catch (err) {
+      console.warn('Wake Lock error:', err);
+    }
+  };
 
   // Refs
   const historyIntervalId = useRef<number | null>(null);
@@ -985,17 +1050,26 @@ export default function App() {
 
   if (!currentCircle) {
     return (
-      <OnboardingModal
-        onJoinCircle={handleJoinCircle}
-        onCreateCircle={handleCreateCircle}
-        onStartDemo={startDemoCircle}
-        defaultName={memberName}
-        defaultRole={memberRole}
-        defaultAvatar={memberAvatar}
-        savedCircles={savedCircles}
-        onSelectSavedCircle={handleSelectSavedCircle}
-        onRemoveSavedCircle={handleRemoveSavedCircle}
-      />
+      <>
+        <OnboardingModal
+          onJoinCircle={handleJoinCircle}
+          onCreateCircle={handleCreateCircle}
+          onStartDemo={startDemoCircle}
+          defaultName={memberName}
+          defaultRole={memberRole}
+          defaultAvatar={memberAvatar}
+          savedCircles={savedCircles}
+          onSelectSavedCircle={handleSelectSavedCircle}
+          onRemoveSavedCircle={handleRemoveSavedCircle}
+          onOpenInstallModal={() => setShowInstallModal(true)}
+        />
+        <InstallAppModal
+          isOpen={showInstallModal}
+          onClose={() => setShowInstallModal(false)}
+          deferredPrompt={deferredPrompt}
+          onInstallSuccess={() => setIsAppInstalled(true)}
+        />
+      </>
     );
   }
 
@@ -1114,6 +1188,33 @@ export default function App() {
 
           {/* Right: Actions */}
           <div className="flex items-center gap-2 sm:gap-3">
+            {/* 1-Tap Install App Button */}
+            {!isAppInstalled && (
+              <button
+                onClick={() => setShowInstallModal(true)}
+                className="px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs shadow-blue-500/20 active:scale-95"
+                title="Install as an App on Phone"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Install App</span>
+                <span className="sm:hidden">App</span>
+              </button>
+            )}
+
+            {/* Keep Screen On / Trip Mode Toggle */}
+            <button
+              onClick={toggleWakeLock}
+              className={`p-2 sm:px-3 sm:py-2 rounded-2xl text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                isWakeLockActive
+                  ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
+                  : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200'
+              }`}
+              title={isWakeLockActive ? 'Screen Stay Awake Active (Trip Mode)' : 'Keep Screen On during trip'}
+            >
+              <Sun className={`w-3.5 h-3.5 ${isWakeLockActive ? 'text-amber-500 animate-spin-slow' : 'text-slate-400'}`} />
+              <span className="hidden sm:inline">{isWakeLockActive ? 'Awake' : 'Trip Wake'}</span>
+            </button>
+
             {/* Center on Me Button */}
             <button
               onClick={handleCenterOnMe}
@@ -1533,6 +1634,15 @@ export default function App() {
         onLeaveCircle={handleLeaveCircle}
         savedCircles={savedCircles}
         onSelectSavedCircle={handleSelectSavedCircle}
+        onOpenInstallModal={() => setShowInstallModal(true)}
+      />
+
+      {/* Install Mobile App Modal */}
+      <InstallAppModal
+        isOpen={showInstallModal}
+        onClose={() => setShowInstallModal(false)}
+        deferredPrompt={deferredPrompt}
+        onInstallSuccess={() => setIsAppInstalled(true)}
       />
     </div>
   );

@@ -11,7 +11,8 @@ import {
   Clock, 
   Trash2, 
   ChevronRight,
-  UserCheck
+  UserCheck,
+  Smartphone
 } from 'lucide-react';
 
 interface OnboardingModalProps {
@@ -24,6 +25,7 @@ interface OnboardingModalProps {
   savedCircles?: SavedCircleSummary[];
   onSelectSavedCircle?: (circleId: string) => void;
   onRemoveSavedCircle?: (circleId: string) => void;
+  onOpenInstallModal?: () => void;
 }
 
 const AVATARS = ['👩', '👨', '👧', '👦', '🧑', '👵', '👴', '🐶', '🚗'];
@@ -38,7 +40,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   defaultAvatar,
   savedCircles = [],
   onSelectSavedCircle,
-  onRemoveSavedCircle
+  onRemoveSavedCircle,
+  onOpenInstallModal
 }) => {
   const [tab, setTab] = useState<'join' | 'create'>('join');
   const [pin, setPin] = useState('');
@@ -149,10 +152,23 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             Real-time family location, safety alerts, and safe zones.
           </p>
 
-          {/* Location status pill */}
-          <div className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200/80 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 rounded-full text-[11px] font-semibold">
-            <MapPin className="w-3.5 h-3.5" />
-            <span>{locationDetected ? 'Live Location Detected' : 'Detecting live location...'}</span>
+          {/* Location status & Install App pills */}
+          <div className="mt-2.5 flex flex-wrap items-center justify-center gap-1.5">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200/80 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 rounded-full text-[11px] font-semibold">
+              <MapPin className="w-3.5 h-3.5" />
+              <span>{locationDetected ? 'Live Location Detected' : 'Detecting live location...'}</span>
+            </div>
+
+            {onOpenInstallModal && (
+              <button
+                type="button"
+                onClick={onOpenInstallModal}
+                className="inline-flex items-center gap-1 px-3 py-1 bg-blue-50 dark:bg-blue-950/60 border border-blue-200/80 dark:border-blue-800 text-blue-600 dark:text-blue-400 rounded-full text-[11px] font-semibold hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors"
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                <span>Install App</span>
+              </button>
+            )}
           </div>
         </div>
 

@@ -14,7 +14,8 @@ import {
   LogOut, 
   X,
   Shield,
-  HelpCircle
+  HelpCircle,
+  Download
 } from 'lucide-react';
 
 interface SettingsModalProps {
@@ -33,6 +34,7 @@ interface SettingsModalProps {
   onLeaveCircle: () => void;
   savedCircles?: SavedCircleSummary[];
   onSelectSavedCircle?: (circleId: string) => void;
+  onOpenInstallModal?: () => void;
 }
 
 const AVATAR_OPTIONS = ['👩', '👨', '👧', '👦', '🧑', '👵', '👴', '🐶', '🐱', '🚗', '🚲', '⭐'];
@@ -53,7 +55,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onThemeChange,
   onLeaveCircle,
   savedCircles = [],
-  onSelectSavedCircle
+  onSelectSavedCircle,
+  onOpenInstallModal
 }) => {
   const [name, setName] = useState(memberName);
   const [role, setRole] = useState<MemberRole>(memberRole);
@@ -308,6 +311,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             )}
           </div>
+
+          {/* 4.5 Install Mobile App Card */}
+          {onOpenInstallModal && (
+            <div className="p-4 rounded-2xl border border-blue-200 dark:border-blue-900 bg-gradient-to-r from-blue-50/60 to-indigo-50/60 dark:from-blue-950/40 dark:to-indigo-950/40 flex items-center justify-between gap-3">
+              <div>
+                <h4 className="font-bold text-xs text-blue-900 dark:text-blue-200">
+                  Install as Mobile App
+                </h4>
+                <p className="text-[11px] text-blue-700/80 dark:text-blue-300/80 mt-0.5">
+                  1-tap app launch on Android or iPhone without App Store.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenInstallModal();
+                }}
+                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shrink-0 inline-flex items-center gap-1.5 transition-colors shadow-xs"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Install</span>
+              </button>
+            </div>
+          )}
 
           {/* 5. Saved Circles Switcher */}
           {savedCircles && savedCircles.length > 0 && onSelectSavedCircle && (
