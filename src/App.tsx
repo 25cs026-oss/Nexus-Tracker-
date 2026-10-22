@@ -1207,6 +1207,14 @@ export default function App() {
     m.id === 'demo-you'
   ) || null;
 
+  // Strictly enforce that who created the room first is the owner of that room
+  const isCircleOwner = Boolean(
+    currentCircle && (
+      (currentCircle.ownerId && currentCircle.ownerId === deviceId) ||
+      (!currentCircle.ownerId && members.length > 0 && members[0]?.id === `${currentCircle.id}_${deviceId}`)
+    )
+  );
+
   // Active map focus target
   const mapFocusTarget = mapFocusOverride || (selectedMember ? { lat: selectedMember.lastLat, lng: selectedMember.lastLng } : currentCoords);
 
@@ -1215,7 +1223,7 @@ export default function App() {
 
       
       {/* 🔔 Host Join Request Approval Banner (Floating at Top) */}
-      {pendingJoinRequests.length > 0 && (currentCircle.ownerId === deviceId || !currentCircle.ownerId) && (
+      {pendingJoinRequests.length > 0 && isCircleOwner && (
         <div className="fixed top-14 left-3 right-3 sm:left-auto sm:right-4 sm:w-96 z-50 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-2 border-blue-500 rounded-3xl p-3.5 shadow-2xl space-y-2 animate-bounce-subtle">
           <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
             <div className="flex items-center gap-1.5 text-xs font-black text-blue-600 dark:text-blue-400">
@@ -1278,6 +1286,9 @@ export default function App() {
             >
               <Users className="w-3.5 h-3.5 text-blue-600 shrink-0" />
               <span className="truncate">{currentCircle.name}</span>
+                  {isCircleOwner && (
+                    <span className="text-amber-500 text-xs font-bold shrink-0" title="You created this circle (Owner)">👑</span>
+                  )}
               <ChevronDown className={`w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform ${showCircleSwitcher ? 'rotate-180' : ''}`} />
             </button>
 
@@ -1655,7 +1666,7 @@ export default function App() {
                   <>
 
               {/* Pending Join Requests Box */}
-              {pendingJoinRequests.length > 0 && (currentCircle.ownerId === deviceId || !currentCircle.ownerId) && (
+              {pendingJoinRequests.length > 0 && isCircleOwner && (
                 <div className="p-3 bg-amber-50 dark:bg-amber-950/40 rounded-2xl border border-amber-200/80 dark:border-amber-800/80 mb-2">
                   <div className="text-xs font-bold text-amber-900 dark:text-amber-200 flex items-center justify-between mb-2">
                     <div className="flex items-center gap-1.5">
@@ -2249,7 +2260,7 @@ export default function App() {
             <div className="flex-1 flex flex-col gap-2.5 overflow-y-auto max-h-[580px] pr-1">
 
               {/* Pending Join Requests Box */}
-              {pendingJoinRequests.length > 0 && (currentCircle.ownerId === deviceId || !currentCircle.ownerId) && (
+              {pendingJoinRequests.length > 0 && isCircleOwner && (
                 <div className="p-3 bg-amber-50 dark:bg-amber-950/40 rounded-2xl border border-amber-200/80 dark:border-amber-800/80 mb-2">
                   <div className="text-xs font-bold text-amber-900 dark:text-amber-200 flex items-center justify-between mb-2">
                     <div className="flex items-center gap-1.5">

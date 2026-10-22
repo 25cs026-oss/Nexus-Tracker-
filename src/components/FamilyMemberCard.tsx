@@ -20,6 +20,8 @@ interface FamilyMemberCardProps {
   member: DeviceMember;
   currentUser?: DeviceMember | null;
   isSelected: boolean;
+  isRoomOwner?: boolean;
+  isCurrentUserOwner?: boolean;
   onSelect: (member: DeviceMember) => void;
   onNavigate?: (member: DeviceMember) => void;
   onDelete?: (memberId: string) => void;
@@ -29,6 +31,8 @@ export const FamilyMemberCard: React.FC<FamilyMemberCardProps> = ({
   member,
   currentUser,
   isSelected,
+  isRoomOwner,
+  isCurrentUserOwner,
   onSelect,
   onNavigate,
   onDelete
