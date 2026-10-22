@@ -1,0 +1,53 @@
+{
+  "entities": {
+    "Grid": {
+      "title": "Grid",
+      "description": "A tracking group identified by a PIN.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The PIN/Access Code." },
+        "name": { "type": "string", "description": "The name of the grid." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp." }
+      },
+      "required": ["id", "name", "createdAt"]
+    },
+    "Device": {
+      "title": "Device",
+      "description": "Represents a tracked device within a grid.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "The name of the device." },
+        "lastLat": { "type": "number", "description": "Last known latitude." },
+        "lastLng": { "type": "number", "description": "Last known longitude." },
+        "lastUpdated": { "type": "string", "format": "date-time", "description": "Timestamp of the last update." },
+        "gridId": { "type": "string", "description": "The ID of the grid this device belongs to." }
+      },
+      "required": ["name", "lastLat", "lastLng", "lastUpdated", "gridId"]
+    },
+    "LocationHistory": {
+      "title": "LocationHistory",
+      "description": "A single coordinate point in the device's history.",
+      "type": "object",
+      "properties": {
+        "lat": { "type": "number", "description": "Latitude." },
+        "lng": { "type": "number", "description": "Longitude." },
+        "timestamp": { "type": "string", "format": "date-time", "description": "Timestamp of the coordinate." }
+      },
+      "required": ["lat", "lng", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/grids/{pin}": {
+      "schema": "Grid",
+      "description": "Collection of tracking grids."
+    },
+    "/devices/{deviceId}": {
+      "schema": "Device",
+      "description": "Collection of tracked devices."
+    },
+    "/devices/{deviceId}/history/{historyId}": {
+      "schema": "LocationHistory",
+      "description": "History of coordinates for a specific device."
+    }
+  }
+}
