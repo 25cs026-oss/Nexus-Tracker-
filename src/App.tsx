@@ -216,6 +216,35 @@ export default function App() {
   const [isBackgroundActive, setIsBackgroundActive] = useState<boolean>(false);
   const [showBackgroundModal, setShowBackgroundModal] = useState<boolean>(false);
 
+  // Battery Optimization: 10-second smart rate-limiter & Eco Background Mode
+  const lastFirestoreSyncRef = useRef<number>(0);
+  const lastSavedCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
+  const isAppHiddenRef = useRef<boolean>(false);
+
+  // Auto-switch to Eco-Mode when user locks screen, minimizes, or switches apps
+  useEffect(() => {
+    const handleVisibility = () => {
+      const isHidden = document.visibilityState === 'hidden';
+      isAppHiddenRef.current = isHidden;
+      geoService.setEcoMode(isHidden);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('blur', () => {
+      isAppHiddenRef.current = true;
+      geoService.setEcoMode(true);
+    });
+    window.addEventListener('focus', () => {
+      isAppHiddenRef.current = false;
+      geoService.setEcoMode(false);
+      lastFirestoreSyncRef.current = 0; // Immediate sync when opening app
+    });
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, []);
+
   // Sync background runner state
   useEffect(() => {
     backgroundRunner.onStateChange((active) => {
@@ -456,6 +485,26 @@ export default function App() {
       }
       return prev;
     });
+
+    // Battery Guard: Throttle Firestore transmissions to 10s in foreground, 30s in background
+    const now = Date.now();
+    const isHidden = isAppHiddenRef.current;
+    const minSyncInterval = isHidden ? 30000 : 9800; // 10s foreground, 30s background
+    const elapsedSinceLastSync = now - lastFirestoreSyncRef.current;
+
+    let distanceMoved = 999;
+    if (lastSavedCoordsRef.current) {
+      const dLat = (res.lat - lastSavedCoordsRef.current.lat) * 111320;
+      const dLng = (res.lng - lastSavedCoordsRef.current.lng) * 111320 * Math.cos(res.lat * Math.PI / 180);
+      distanceMoved = Math.sqrt(dLat * dLat + dLng * dLng);
+    }
+
+    if (lastFirestoreSyncRef.current > 0 && elapsedSinceLastSync < minSyncInterval && distanceMoved < 12 && (!res.speed || res.speed < 1)) {
+      return;
+    }
+
+    lastFirestoreSyncRef.current = now;
+    lastSavedCoordsRef.current = { lat: res.lat, lng: res.lng };
 
     try {
       await setDoc(doc(db, 'devices', memberDocId), payload, { merge: true });

@@ -1,9 +1,10 @@
 /**
- * Robust, instant live geolocation service:
+ * Robust, battery-optimized live geolocation service:
  * 1. Checks Browser Geolocation (GPS / Wi-Fi) with generous timeout
  * 2. Rapid IP-based City Geolocation pre-seed (< 1 second) so the map immediately centers on user's real location
- * 3. Seamlessly upgrades to high-accuracy GPS as soon as satellite/hardware fixes
- * 4. Continuously watches position
+ * 3. 10-second smart interval throttling to protect phone battery
+ * 4. Eco Background Mode (low-power cell/Wi-Fi assisted) when app is minimized or phone is locked
+ * 5. Continuously watches position with minimal CPU drain
  */
 
 export interface GeoLocationResult {
@@ -23,6 +24,8 @@ export class GeolocationService {
   private onStatusCallback: ((status: GpsStatus, errorMsg?: string) => void) | null = null;
   private isRunning: boolean = false;
   private hasAccurateLock: boolean = false;
+  private isEcoMode: boolean = false;
+  private lastEmitTime: number = 0;
   public lastKnownPosition: GeoLocationResult | null = null;
 
   public isSecureContext(): boolean {
@@ -58,6 +61,15 @@ export class GeolocationService {
     return null;
   }
 
+  public setEcoMode(eco: boolean) {
+    if (this.isEcoMode === eco) return;
+    this.isEcoMode = eco;
+    if (this.isRunning) {
+      // Restart watch with low-power or high-accuracy configuration
+      this.startWatch();
+    }
+  }
+
   public async startTracking(
     onPosition: (pos: GeoLocationResult) => void,
     onStatus: (status: GpsStatus, errorMsg?: string) => void
@@ -79,9 +91,7 @@ export class GeolocationService {
 
     onStatus('searching', 'Acquiring your live location...');
 
-    // Parallel Strategy:
-    // 1. Instantly trigger IP lookup in background (usually finishes in 300ms)
-    // If browser GPS takes a few seconds or prompts for permission, user sees their real city immediately!
+    // Parallel Strategy: Fast IP lookup
     this.getFastIpLocation().then(ipPos => {
       if (ipPos && this.isRunning && !this.hasAccurateLock) {
         this.lastKnownPosition = ipPos;
@@ -95,7 +105,7 @@ export class GeolocationService {
       return;
     }
 
-    // 2. Request browser geolocation (high accuracy first)
+    // High accuracy first fix
     navigator.geolocation.getCurrentPosition(
       (position) => {
         if (!this.isRunning) return;
@@ -127,13 +137,13 @@ export class GeolocationService {
         );
       },
       {
-        enableHighAccuracy: true,
+        enableHighAccuracy: !this.isEcoMode,
         timeout: 20000,
         maximumAge: 5000
       }
     );
 
-    // 3. Continuously watch position
+    // Continuous watch with battery-efficient 10s throttling
     this.startWatch();
   }
 
@@ -155,18 +165,23 @@ export class GeolocationService {
         if (err.code === 1) {
           this.onStatusCallback?.('denied', 'Location permission denied in browser.');
         } else {
-          console.warn('watchPosition skipped frame:', err.message);
+          console.warn('watchPosition frame skipped:', err.message);
         }
       },
       {
-        enableHighAccuracy: true,
-        maximumAge: 5000,
-        timeout: 25000
+        enableHighAccuracy: !this.isEcoMode,
+        maximumAge: this.isEcoMode ? 25000 : 8000,
+        timeout: 30000
       }
     );
   }
 
   private handleSuccess(position: GeolocationPosition, isApproximate: boolean) {
+    const now = Date.now();
+    // In foreground: throttle to ~10s. In background eco mode: throttle to ~25-30s.
+    const minInterval = this.isEcoMode ? 25000 : 9500;
+    
+    // Always store latest known position
     const { latitude, longitude, accuracy, speed, heading } = position.coords;
     const result: GeoLocationResult = {
       lat: latitude,
@@ -177,6 +192,13 @@ export class GeolocationService {
       isApproximate
     };
     this.lastKnownPosition = result;
+
+    if (this.lastEmitTime > 0 && now - this.lastEmitTime < minInterval) {
+      // Skip emission to preserve phone battery and prevent excessive CPU / state recalculation
+      return;
+    }
+
+    this.lastEmitTime = now;
     this.onStatusCallback?.(isApproximate ? 'approximate' : 'active');
     this.onPositionCallback?.(result);
   }

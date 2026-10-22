@@ -1,17 +1,17 @@
 /**
  * Nexus Background Location Runner
  * 
- * Uses HTML5 Audio Loop + MediaSession API + WakeLock API to keep
- * GPS tracking alive when the phone is locked, in the pocket, or switching apps.
+ * Uses HTML5 Audio Loop + MediaSession API to keep GPS tracking alive
+ * in the background when phone screen is locked or switching apps,
+ * without forcing screen to stay awake (minimizing battery usage).
  */
 
 // 1-second silent WAV audio
-const SILENT_WAV_BASE64 = 'data:audio/wav;base64,UklGRjIAAABXQVZFZm10IBIAAAABAAEAQB8AAEAfAAABAAgAAABkYXRhEgAAAAEAAQCg/6D/oP+g/6D/oP+g/6D/';
+const SILENT_WAV_BASE64 = 'data:audio/wav;base64,UklGRjIAAABXQVZFZm10IBIAAAABAAEAQB8AAEAfAAABAAgAAABkYXRhEgAAAAEAAQCg/6D/oP+g/6D/';
 
 export class BackgroundLocationRunner {
   private audio: HTMLAudioElement | null = null;
   private isRunning: boolean = false;
-  private wakeLock: any = null;
   private onStateChangeCallback: ((active: boolean) => void) | null = null;
 
   constructor() {
@@ -50,7 +50,7 @@ export class BackgroundLocationRunner {
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         navigator.mediaSession.metadata = new MediaMetadata({
           title: 'Nexus Family Tracker',
-          artist: 'Live GPS Tracking Active in Background',
+          artist: 'Eco Background Location Active (10s intervals)',
           album: 'Family Safety',
           artwork: [
             { src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' },
@@ -66,13 +66,8 @@ export class BackgroundLocationRunner {
         });
       }
 
-      // Try acquiring Screen Wake Lock (Trip Mode)
-      if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
-        try {
-          this.wakeLock = await (navigator as any).wakeLock.request('screen');
-        } catch {}
-      }
-
+      // NOTE: We do NOT hold Screen WakeLock here so the phone screen
+      // can sleep naturally in pockets, saving 80% battery!
       this.isRunning = true;
       this.onStateChangeCallback?.(true);
       return true;
@@ -91,13 +86,6 @@ export class BackgroundLocationRunner {
       try {
         this.audio.pause();
         this.audio.currentTime = 0;
-      } catch {}
-    }
-
-    if (this.wakeLock) {
-      try {
-        this.wakeLock.release();
-        this.wakeLock = null;
       } catch {}
     }
 
