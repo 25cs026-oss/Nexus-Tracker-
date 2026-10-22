@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nexus-tracker-pwa-v4';
+const CACHE_NAME = 'nexus-tracker-pwa-v5';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -89,6 +89,33 @@ self.addEventListener('notificationclick', (event) => {
       }
     })
   );
+});
+
+// Web Push event (Emergency SOS alerts when app is closed / screen off)
+self.addEventListener('push', (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = {
+      title: '🚨 EMERGENCY SOS ALERT!',
+      body: event.data ? event.data.text() : 'A family member triggered an emergency SOS!'
+    };
+  }
+
+  const title = payload.title || '🚨 EMERGENCY SOS ALERT!';
+  const options = {
+    body: payload.body || 'A family member pressed the SOS button! Tap to view live location.',
+    icon: '/pwa-192x192.png',
+    badge: '/icon.svg',
+    tag: 'nexus-emergency-sos',
+    requireInteraction: true,
+    renotify: true,
+    vibrate: [500, 200, 500, 200, 500, 200, 800],
+    data: { url: payload.url || '/' }
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 
 // Background Sync

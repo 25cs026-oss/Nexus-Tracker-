@@ -30,6 +30,7 @@ public class LocationService extends Service implements LocationListener {
 
     private static final String TAG = "NexusLocationService";
     private static final String CHANNEL_ID = "nexus_tracker_channel";
+    private static final String EMERGENCY_CHANNEL_ID = "nexus_emergency_channel";
     private static final int NOTIFICATION_ID = 9001;
 
     private LocationManager locationManager;
@@ -56,9 +57,20 @@ public class LocationService extends Service implements LocationListener {
             channel.setDescription("Keeps family location sharing active in background");
             channel.setShowBadge(true);
 
+            NotificationChannel emergencyChannel = new NotificationChannel(
+                    EMERGENCY_CHANNEL_ID,
+                    "Nexus Emergency SOS Alerts",
+                    NotificationManager.IMPORTANCE_HIGH
+            );
+            emergencyChannel.setDescription("High urgency SOS emergency family alerts");
+            emergencyChannel.enableVibration(true);
+            emergencyChannel.setVibrationPattern(new long[]{0, 500, 200, 500, 200, 500, 200, 800});
+            emergencyChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {
                 manager.createNotificationChannel(channel);
+                manager.createNotificationChannel(emergencyChannel);
             }
         }
     }

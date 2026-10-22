@@ -275,6 +275,27 @@ export default function App() {
     } catch (err) {
       console.warn('Heartbeat firestore sync failed:', err);
     }
+
+    // Background Active SOS Poller (guarantees screen-off / background notification delivery)
+    try {
+      const sosQ = query(
+        collection(db, 'devices'),
+        where('gridId', '==', currentCircle.id),
+        where('isSosActive', '==', true)
+      );
+      const sosSnap = await getDocs(sosQ);
+      if (!sosSnap.empty) {
+        for (const docSnap of sosSnap.docs) {
+          const sosMember = docSnap.data() as DeviceMember;
+          if (sosMember.id !== memberDocId) {
+            // Another member triggered SOS!
+            notificationManager.showSosAlertNotification(sosMember.name, sosMember.currentPlace);
+            sirenAudio.start();
+            setShowSosModal(true);
+          }
+        }
+      }
+    } catch {}
   }, [currentCircle, isDemoMode, isSharingPaused, currentCoords, deviceId, safeZones, memberName, memberRole, memberAvatar, currentSpeed, gpsAccuracy]);
 
   // Auto-switch to Eco-Mode when user locks screen, minimizes, or switches apps + wake up on resume
@@ -713,6 +734,14 @@ export default function App() {
       // Only approved members are shown in live tracking
       const approvedOnly = rawList.filter(m => m.status !== 'pending' || m.id === memberDocId);
 
+      // Real-time detection of external SOS alert
+      const otherSos = approvedOnly.find(m => m.isSosActive && m.id !== memberDocId);
+      if (otherSos) {
+        notificationManager.showSosAlertNotification(otherSos.name, otherSos.currentPlace);
+        sirenAudio.start();
+        setShowSosModal(true);
+      }
+
       // Deduplicate: If multiple docs in Firestore share the same ID or name, keep only ONE clean item
       const seenIds = new Set<string>();
       const seenNames = new Set<string>();
@@ -921,6 +950,7 @@ export default function App() {
   }, [memberRole, memberAvatar, memberName]);
 
   const handleSelectSavedCircle = useCallback(async (circleId: string) => {
+    notificationManager.requestPermission().catch(() => {});
     if (circleId === DEMO_PIN) {
       startDemoCircle();
       return;
@@ -1004,6 +1034,7 @@ export default function App() {
     role: MemberRole, 
     avatar: string
   ): Promise<any> => {
+    notificationManager.requestPermission().catch(() => {});
     if (pin === DEMO_PIN) {
       startDemoCircle();
       return { success: true };
@@ -1106,6 +1137,7 @@ export default function App() {
     role: MemberRole, 
     avatar: string
   ): Promise<boolean> => {
+    notificationManager.requestPermission().catch(() => {});
     try {
       // Determine real live coordinates
       let userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat;
