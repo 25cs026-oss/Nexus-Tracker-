@@ -2,87 +2,99 @@ import { DeviceMember, GridCircle, SafeZone, CheckInPing, HistoryPoint } from '.
 
 export const DEMO_PIN = 'FAMILY';
 
-export const DEMO_CIRCLE: GridCircle = {
-  id: DEMO_PIN,
-  name: 'The Anderson Family',
-  createdAt: new Date().toISOString(),
-  safeZones: [
-    { id: 'zone-1', name: 'Home', icon: '🏠', lat: 37.7749, lng: -122.4194, radius: 200 },
-    { id: 'zone-2', name: 'Lincoln High School', icon: '🏫', lat: 37.7833, lng: -122.4167, radius: 250 },
-    { id: 'zone-3', name: 'City Park', icon: '🌳', lat: 37.7690, lng: -122.4467, radius: 500 }
-  ]
-};
+export function createDemoDataForLocation(baseLat: number, baseLng: number) {
+  const safeZones: SafeZone[] = [
+    { id: 'zone-1', name: 'Home', icon: '🏠', lat: baseLat, lng: baseLng, radius: 250 },
+    { id: 'zone-2', name: 'Neighborhood School', icon: '🏫', lat: baseLat + 0.006, lng: baseLng + 0.005, radius: 300 },
+    { id: 'zone-3', name: 'Central Park', icon: '🌳', lat: baseLat - 0.008, lng: baseLng - 0.006, radius: 450 }
+  ];
 
-export const DEMO_MEMBERS: DeviceMember[] = [
-  {
-    id: 'demo-mom',
-    name: 'Sarah (Mom)',
-    role: 'Mom',
-    avatar: '👩',
-    lastLat: 37.7833,
-    lastLng: -122.4167,
-    lastUpdated: new Date(Date.now() - 1000 * 60 * 2), // 2 mins ago
-    gridId: DEMO_PIN,
-    battery: 88,
-    isCharging: false,
-    speed: 0,
-    currentPlace: 'Lincoln High School',
-    statusMessage: 'Waiting for pickup at main gate 🏫'
-  },
-  {
-    id: 'demo-dad',
-    name: 'David (Dad)',
-    role: 'Dad',
-    avatar: '👨',
-    lastLat: 37.7650,
-    lastLng: -122.4250,
-    lastUpdated: new Date(Date.now() - 1000 * 30), // 30s ago
-    gridId: DEMO_PIN,
-    battery: 64,
-    isCharging: true,
-    speed: 8.5, // ~30 km/h driving
-    currentPlace: undefined,
-    statusMessage: 'Driving back from office 🚗'
-  },
-  {
-    id: 'demo-emma',
-    name: 'Emma (Kid)',
-    role: 'Daughter',
-    avatar: '👧',
-    lastLat: 37.7749,
-    lastLng: -122.4194,
-    lastUpdated: new Date(Date.now() - 1000 * 60 * 5),
-    gridId: DEMO_PIN,
-    battery: 95,
-    isCharging: true,
-    speed: 0,
-    currentPlace: 'Home',
-    statusMessage: 'Doing homework at home 📚'
-  }
-];
+  const circle: GridCircle = {
+    id: DEMO_PIN,
+    name: 'The Anderson Family',
+    createdAt: new Date().toISOString(),
+    safeZones
+  };
 
-export const DEMO_CHECKINS: CheckInPing[] = [
-  {
-    id: 'c1',
-    deviceId: 'demo-emma',
-    memberName: 'Emma (Kid)',
-    avatar: '👧',
-    message: '🏡 Arrived safely at Home!',
-    timestamp: new Date(Date.now() - 1000 * 60 * 25)
-  },
-  {
-    id: 'c2',
-    deviceId: 'demo-dad',
-    memberName: 'David (Dad)',
-    avatar: '👨',
-    message: '🚗 Heading home now, see you in 20 mins!',
-    timestamp: new Date(Date.now() - 1000 * 60 * 10)
-  }
-];
+  const members: DeviceMember[] = [
+    {
+      id: 'demo-you',
+      name: 'You (Me)',
+      role: 'Son',
+      avatar: '🧑',
+      lastLat: baseLat,
+      lastLng: baseLng,
+      lastUpdated: new Date(),
+      gridId: DEMO_PIN,
+      battery: 88,
+      isCharging: false,
+      speed: 0,
+      currentPlace: 'Home',
+      statusMessage: 'At home with family 🏡'
+    },
+    {
+      id: 'demo-mom',
+      name: 'Sarah (Mom)',
+      role: 'Mom',
+      avatar: '👩',
+      lastLat: baseLat + 0.006,
+      lastLng: baseLng + 0.005,
+      lastUpdated: new Date(Date.now() - 1000 * 60 * 2),
+      gridId: DEMO_PIN,
+      battery: 92,
+      isCharging: false,
+      speed: 0,
+      currentPlace: 'Neighborhood School',
+      statusMessage: 'At school picking up supplies 🏫'
+    },
+    {
+      id: 'demo-dad',
+      name: 'David (Dad)',
+      role: 'Dad',
+      avatar: '👨',
+      lastLat: baseLat - 0.009,
+      lastLng: baseLng - 0.007,
+      lastUpdated: new Date(Date.now() - 1000 * 25),
+      gridId: DEMO_PIN,
+      battery: 68,
+      isCharging: true,
+      speed: 7.2, // ~26 km/h driving
+      currentPlace: undefined,
+      statusMessage: 'Driving back home 🚗'
+    }
+  ];
 
-export const DEMO_HISTORY: HistoryPoint[] = [
-  { lat: 37.7650, lng: -122.4250, timestamp: new Date(Date.now() - 1000 * 30), speed: 8.5, placeName: 'Market & 16th St' },
-  { lat: 37.7620, lng: -122.4280, timestamp: new Date(Date.now() - 1000 * 60 * 3), speed: 9.2, placeName: 'Mission District' },
-  { lat: 37.7590, lng: -122.4310, timestamp: new Date(Date.now() - 1000 * 60 * 8), speed: 7.1, placeName: 'Valencia Corridor' },
-  { lat: 37.7540, lng: -122.4150, timestamp: new Date(Date.now() - 1000 * 60 * 15), speed: 0, placeName: 'Tech Campus' }
-];
+  const checkIns: CheckInPing[] = [
+    {
+      id: 'c1',
+      deviceId: 'demo-you',
+      memberName: 'You (Me)',
+      avatar: '🧑',
+      message: '🏡 Arrived safely at Home!',
+      timestamp: new Date(Date.now() - 1000 * 60 * 15)
+    },
+    {
+      id: 'c2',
+      deviceId: 'demo-dad',
+      memberName: 'David (Dad)',
+      avatar: '👨',
+      message: '🚗 On my way back, see you soon!',
+      timestamp: new Date(Date.now() - 1000 * 60 * 5)
+    }
+  ];
+
+  const history: HistoryPoint[] = [
+    { lat: baseLat - 0.009, lng: baseLng - 0.007, timestamp: new Date(Date.now() - 1000 * 25), speed: 7.2, placeName: 'City Avenue' },
+    { lat: baseLat - 0.015, lng: baseLng - 0.011, timestamp: new Date(Date.now() - 1000 * 60 * 4), speed: 8.5, placeName: 'Main Boulevard' },
+    { lat: baseLat - 0.022, lng: baseLng - 0.015, timestamp: new Date(Date.now() - 1000 * 60 * 12), speed: 6.8, placeName: 'Business District' }
+  ];
+
+  return { circle, members, checkIns, history, safeZones };
+}
+
+// Default fallback
+const defaultData = createDemoDataForLocation(19.0760, 72.8777);
+export const DEMO_CIRCLE = defaultData.circle;
+export const DEMO_MEMBERS = defaultData.members;
+export const DEMO_CHECKINS = defaultData.checkIns;
+export const DEMO_HISTORY = defaultData.history;

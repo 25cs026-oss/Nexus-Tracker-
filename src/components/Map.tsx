@@ -188,8 +188,7 @@ export const Map: React.FC<MapProps> = ({
   const defaultCenter = useMemo<[number, number]>(() => {
     if (focusLocation) return [focusLocation.lat, focusLocation.lng];
     if (selectedMember) return [selectedMember.lastLat, selectedMember.lastLng];
-    if (members.length > 0) return [members[0].lastLat, members[0].lastLng];
-    return [37.7749, -122.4194];
+    return [19.0760, 72.8777];
   }, []);
 
   return (

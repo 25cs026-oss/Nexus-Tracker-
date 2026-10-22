@@ -1,8 +1,9 @@
 /**
- * Robust, lightweight geolocation service with multi-tier fallbacks:
- * 1. High Accuracy GPS (mobile/satellites)
- * 2. Low Accuracy Wi-Fi/Cellular (laptops/desktops)
- * 3. IP Geo fallback (when GPS hardware is absent or times out)
+ * Robust, instant live geolocation service:
+ * 1. Checks Browser Geolocation (GPS / Wi-Fi) with generous timeout
+ * 2. Rapid IP-based City Geolocation pre-seed (< 1 second) so the map immediately centers on user's real location
+ * 3. Seamlessly upgrades to high-accuracy GPS as soon as satellite/hardware fixes
+ * 4. Continuously watches position
  */
 
 export interface GeoLocationResult {
@@ -21,11 +22,40 @@ export class GeolocationService {
   private onPositionCallback: ((pos: GeoLocationResult) => void) | null = null;
   private onStatusCallback: ((status: GpsStatus, errorMsg?: string) => void) | null = null;
   private isRunning: boolean = false;
+  private hasAccurateLock: boolean = false;
+  public lastKnownPosition: GeoLocationResult | null = null;
 
   public isSecureContext(): boolean {
     if (typeof window === 'undefined') return true;
     const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
     return window.isSecureContext || isLocal;
+  }
+
+  /**
+   * Fast IP geolocation lookup to instantly find the user's real city/country
+   */
+  public async getFastIpLocation(): Promise<GeoLocationResult | null> {
+    try {
+      const res = await fetch('https://get.geojs.io/v1/ip/geo.json');
+      const data = await res.json();
+      if (data && data.latitude && data.longitude) {
+        const lat = parseFloat(data.latitude);
+        const lng = parseFloat(data.longitude);
+        if (!isNaN(lat) && !isNaN(lng)) {
+          return {
+            lat,
+            lng,
+            accuracy: 3000,
+            speed: null,
+            heading: null,
+            isApproximate: true
+          };
+        }
+      }
+    } catch {
+      // IP lookup failed
+    }
+    return null;
   }
 
   public async startTracking(
@@ -35,51 +65,75 @@ export class GeolocationService {
     this.onPositionCallback = onPosition;
     this.onStatusCallback = onStatus;
     this.isRunning = true;
+    this.hasAccurateLock = false;
+
+    // If we already have a cached position, emit it immediately
+    if (this.lastKnownPosition) {
+      onPosition(this.lastKnownPosition);
+      onStatus(this.lastKnownPosition.isApproximate ? 'approximate' : 'active');
+    }
 
     if (!this.isSecureContext()) {
       onStatus('insecure', 'Browser requires HTTPS or localhost for GPS.');
     }
 
+    onStatus('searching', 'Acquiring your live location...');
+
+    // Parallel Strategy:
+    // 1. Instantly trigger IP lookup in background (usually finishes in 300ms)
+    // If browser GPS takes a few seconds or prompts for permission, user sees their real city immediately!
+    this.getFastIpLocation().then(ipPos => {
+      if (ipPos && this.isRunning && !this.hasAccurateLock) {
+        this.lastKnownPosition = ipPos;
+        this.onPositionCallback?.(ipPos);
+        this.onStatusCallback?.('approximate', 'Using approximate city location while GPS locks...');
+      }
+    });
+
     if (!('geolocation' in navigator)) {
-      onStatus('unavailable', 'Geolocation is not supported by your browser.');
-      await this.tryIpFallback();
+      onStatus('unavailable', 'Browser does not support GPS geolocation.');
       return;
     }
 
-    onStatus('searching', 'Acquiring GPS location...');
+    // 2. Request browser geolocation (high accuracy first)
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        if (!this.isRunning) return;
+        this.hasAccurateLock = true;
+        this.handleSuccess(position, false);
+      },
+      (err) => {
+        console.warn('High-accuracy GPS request error:', err.message);
+        if (err.code === 1) { // PERMISSION_DENIED
+          onStatus('denied', 'Location permission denied. Please allow in browser address bar.');
+          return;
+        }
 
-    // Step 1: Immediate lock with high accuracy (short timeout 6s)
-    try {
-      const pos = await this.getPositionPromise({
+        // Retry with low accuracy (Wi-Fi / Network)
+        navigator.geolocation.getCurrentPosition(
+          (fallbackPos) => {
+            if (!this.isRunning) return;
+            this.hasAccurateLock = true;
+            this.handleSuccess(fallbackPos, false);
+          },
+          (fallbackErr) => {
+            console.warn('Low-accuracy fallback error:', fallbackErr.message);
+          },
+          {
+            enableHighAccuracy: false,
+            timeout: 20000,
+            maximumAge: 60000
+          }
+        );
+      },
+      {
         enableHighAccuracy: true,
-        timeout: 6000,
+        timeout: 20000,
         maximumAge: 5000
-      });
-      this.handleSuccess(pos, false);
-    } catch (err: any) {
-      console.warn('High accuracy GPS timed out or failed, falling back to low accuracy:', err?.message);
-      
-      if (err?.code === 1) { // PERMISSION_DENIED
-        onStatus('denied', 'Location permission denied. Please enable in browser settings.');
-        await this.tryIpFallback();
-        return;
       }
+    );
 
-      // Step 2: Fallback to Low Accuracy (works on PCs, Laptops, Wi-Fi)
-      try {
-        const pos = await this.getPositionPromise({
-          enableHighAccuracy: false,
-          timeout: 8000,
-          maximumAge: 60000
-        });
-        this.handleSuccess(pos, false);
-      } catch (fallbackErr: any) {
-        console.warn('Standard geolocation failed, trying IP geo fallback:', fallbackErr?.message);
-        await this.tryIpFallback();
-      }
-    }
-
-    // Step 3: Start continuous watch with resilient settings
+    // 3. Continuously watch position
     this.startWatch();
   }
 
@@ -93,70 +147,38 @@ export class GeolocationService {
     this.watchId = navigator.geolocation.watchPosition(
       (position) => {
         if (!this.isRunning) return;
+        this.hasAccurateLock = true;
         this.handleSuccess(position, false);
       },
       (err) => {
         if (!this.isRunning) return;
         if (err.code === 1) {
-          this.onStatusCallback?.('denied', 'Location permission denied.');
+          this.onStatusCallback?.('denied', 'Location permission denied in browser.');
         } else {
-          // If watch error, do not kill the app, keep last known position
-          console.warn('watchPosition update skipped:', err.message);
+          console.warn('watchPosition skipped frame:', err.message);
         }
       },
       {
-        enableHighAccuracy: false, // Use battery-friendly low accuracy for continuous watching
-        maximumAge: 10000,
-        timeout: 15000
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 25000
       }
     );
   }
 
   private handleSuccess(position: GeolocationPosition, isApproximate: boolean) {
     const { latitude, longitude, accuracy, speed, heading } = position.coords;
-    this.onStatusCallback?.(isApproximate ? 'approximate' : 'active');
-    this.onPositionCallback?.({
+    const result: GeoLocationResult = {
       lat: latitude,
       lng: longitude,
-      accuracy: Math.round(accuracy || 20),
+      accuracy: Math.round(accuracy || 15),
       speed: speed,
       heading: heading,
       isApproximate
-    });
-  }
-
-  private async tryIpFallback() {
-    if (!this.isRunning) return;
-    try {
-      this.onStatusCallback?.('searching', 'Locating via network IP...');
-      const res = await fetch('https://get.geojs.io/v1/ip/geo.json');
-      const data = await res.json();
-      if (data && data.latitude && data.longitude) {
-        const lat = parseFloat(data.latitude);
-        const lng = parseFloat(data.longitude);
-        if (!isNaN(lat) && !isNaN(lng)) {
-          this.onStatusCallback?.('approximate', 'Using approximate city location.');
-          this.onPositionCallback?.({
-            lat,
-            lng,
-            accuracy: 5000,
-            speed: null,
-            heading: null,
-            isApproximate: true
-          });
-          return;
-        }
-      }
-    } catch {
-      // IP lookup failed
-    }
-    this.onStatusCallback?.('unavailable', 'Unable to determine GPS location.');
-  }
-
-  private getPositionPromise(options: PositionOptions): Promise<GeolocationPosition> {
-    return new Promise((resolve, reject) => {
-      navigator.geolocation.getCurrentPosition(resolve, reject, options);
-    });
+    };
+    this.lastKnownPosition = result;
+    this.onStatusCallback?.(isApproximate ? 'approximate' : 'active');
+    this.onPositionCallback?.(result);
   }
 
   public stopTracking() {

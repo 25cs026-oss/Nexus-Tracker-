@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { MemberRole } from '../types';
-import { Users, Plus, KeyRound, Sparkles, Shield, ArrowRight } from 'lucide-react';
+import { geoService, GeoLocationResult } from '../utils/geolocation';
+import { Users, Plus, KeyRound, Sparkles, MapPin, ArrowRight } from 'lucide-react';
 
 interface OnboardingModalProps {
   onJoinCircle: (pin: string, name: string, role: MemberRole, avatar: string) => Promise<boolean>;
@@ -30,6 +31,17 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [avatar, setAvatar] = useState(defaultAvatar || '👩');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [locationDetected, setLocationDetected] = useState<boolean>(false);
+
+  // Pre-seed live location acquisition as soon as onboarding is opened
+  useEffect(() => {
+    geoService.startTracking(
+      (pos: GeoLocationResult) => {
+        setLocationDetected(true);
+      },
+      () => {}
+    );
+  }, []);
 
   const generateRandomPin = () => {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -96,7 +108,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center p-4 font-sans">
       <div className="max-w-md w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-xl overflow-hidden p-6 sm:p-8">
         {/* Brand Header */}
-        <div className="text-center mb-6">
+        <div className="text-center mb-5">
           <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 text-white mx-auto flex items-center justify-center shadow-md shadow-blue-500/20 mb-3">
             <Users className="w-7 h-7" />
           </div>
@@ -104,8 +116,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             Nexus Family Tracker
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Stay close to the people who matter most with real-time location & safety alerts.
+            Real-time family location, safety alerts, and safe zones.
           </p>
+
+          {/* Location status pill */}
+          <div className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200/80 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 rounded-full text-[11px] font-semibold">
+            <MapPin className="w-3.5 h-3.5" />
+            <span>{locationDetected ? 'Live Location Detected' : 'Detecting live location...'}</span>
+          </div>
         </div>
 
         {/* Tab Switcher */}
@@ -351,7 +369,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             <span>Try Instant Demo Circle (No Setup Needed)</span>
           </button>
           <p className="text-[11px] text-slate-400 mt-2">
-            Experience real-time family tracking, safe places, and SOS alerts instantly.
+            Experience real-time family tracking centered on your city.
           </p>
         </div>
       </div>
