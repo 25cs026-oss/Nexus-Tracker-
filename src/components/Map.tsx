@@ -204,6 +204,7 @@ export const Map: React.FC<MapProps> = ({
   focusLocation
 }) => {
   const [activeLayer, setActiveLayer] = useState<'streets' | 'satellite' | 'dark'>('streets');
+  const [showLayerMenu, setShowLayerMenu] = useState(false);
   const [triggerFit, setTriggerFit] = useState(0);
 
   // Compute default center once upon mounting
@@ -370,45 +371,68 @@ export const Map: React.FC<MapProps> = ({
       {/* Floating Controls Bar (Top Right) */}
       <div className="absolute top-3 right-3 z-[400] flex flex-col gap-2">
         {/* Layer Switcher */}
-        <div className="relative group">
+        <div className="relative">
           <button
-            className="w-9 h-9 bg-white/95 dark:bg-slate-800/95 backdrop-blur-xs text-slate-700 dark:text-slate-200 rounded-xl shadow-md border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all"
-            title="Map Style"
+            onClick={() => setShowLayerMenu(prev => !prev)}
+            className="w-9 h-9 bg-white/95 dark:bg-slate-800/95 backdrop-blur-xs text-slate-700 dark:text-slate-200 rounded-xl shadow-md border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all active:scale-95"
+            title="Choose Map Style"
           >
             <Layers className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
           </button>
-          <div className="absolute right-0 top-11 hidden group-hover:flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl p-1.5 gap-1 min-w-[120px] z-50">
-            <button
-              onClick={() => setActiveLayer('streets')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
-                activeLayer === 'streets' 
-                  ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
-                  : 'text-slate-700 dark:text-slate-300'
-              }`}
-            >
-              🗺️ Streets
-            </button>
-            <button
-              onClick={() => setActiveLayer('satellite')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
-                activeLayer === 'satellite' 
-                  ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
-                  : 'text-slate-700 dark:text-slate-300'
-              }`}
-            >
-              🛰️ Satellite
-            </button>
-            <button
-              onClick={() => setActiveLayer('dark')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
-                activeLayer === 'dark' 
-                  ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
-                  : 'text-slate-700 dark:text-slate-300'
-              }`}
-            >
-              🌙 Voyager
-            </button>
-          </div>
+
+          {showLayerMenu && (
+            <>
+              {/* Invisible click-outside dismiss backdrop */}
+              <div 
+                className="fixed inset-0 z-40" 
+                onClick={() => setShowLayerMenu(false)}
+              />
+              <div className="absolute right-0 top-full mt-1.5 flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-xl p-1.5 gap-1 min-w-[130px] z-50 animate-fade-in">
+                <button
+                  onClick={() => {
+                    setActiveLayer('streets');
+                    setShowLayerMenu(false);
+                  }}
+                  className={`px-3 py-2 rounded-xl text-xs font-semibold text-left transition-colors flex items-center gap-2 ${
+                    activeLayer === 'streets' 
+                      ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
+                      : 'text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700/60'
+                  }`}
+                >
+                  <span>🗺️</span>
+                  <span>Streets</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveLayer('satellite');
+                    setShowLayerMenu(false);
+                  }}
+                  className={`px-3 py-2 rounded-xl text-xs font-semibold text-left transition-colors flex items-center gap-2 ${
+                    activeLayer === 'satellite' 
+                      ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
+                      : 'text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700/60'
+                  }`}
+                >
+                  <span>🛰️</span>
+                  <span>Satellite</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveLayer('dark');
+                    setShowLayerMenu(false);
+                  }}
+                  className={`px-3 py-2 rounded-xl text-xs font-semibold text-left transition-colors flex items-center gap-2 ${
+                    activeLayer === 'dark' 
+                      ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
+                      : 'text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700/60'
+                  }`}
+                >
+                  <span>🌙</span>
+                  <span>Voyager</span>
+                </button>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Fit All Members */}
