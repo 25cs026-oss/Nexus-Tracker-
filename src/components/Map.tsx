@@ -14,6 +14,7 @@ import { DeviceMember, SafeZone, HistoryPoint } from '../types';
 import { formatRelativeTime, formatSpeed } from '../utils/geo';
 import { 
   Crosshair, 
+  Users,
   Navigation, 
   Layers, 
   Battery, 
@@ -506,9 +507,9 @@ export const Map: React.FC<MapProps> = ({
         <button
           onClick={() => setTriggerFit(prev => prev + 1)}
           className="w-9 h-9 bg-white/95 dark:bg-slate-800/95 backdrop-blur-xs text-slate-700 dark:text-slate-200 rounded-xl shadow-md border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all"
-          title="Fit All Members"
+          title="Fit All Family Members in View"
         >
-          <Crosshair className="w-4 h-4 text-slate-700 dark:text-slate-200" />
+          <Users className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
         </button>
       </div>
 

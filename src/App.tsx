@@ -143,6 +143,30 @@ export default function App() {
   const [mobileSheetExpanded, setMobileSheetExpanded] = useState<boolean>(false);
   const [mobileTab, setMobileTab] = useState<'members' | 'history' | 'checkins'>('members');
 
+  // Mobile Bottom Sheet Gesture Tracking
+  const touchStartY = useRef<number>(0);
+  const touchCurrentY = useRef<number>(0);
+
+  const handleSheetTouchStart = (e: React.TouchEvent) => {
+    touchStartY.current = e.touches[0].clientY;
+    touchCurrentY.current = e.touches[0].clientY;
+  };
+
+  const handleSheetTouchMove = (e: React.TouchEvent) => {
+    touchCurrentY.current = e.touches[0].clientY;
+  };
+
+  const handleSheetTouchEnd = () => {
+    const deltaY = touchStartY.current - touchCurrentY.current;
+    if (deltaY > 30) {
+      // Swiped UP -> expand bottom sheet
+      setMobileSheetExpanded(true);
+    } else if (deltaY < -30) {
+      // Swiped DOWN -> collapse bottom sheet to peek
+      setMobileSheetExpanded(false);
+    }
+  };
+
   // Live Data
   const [members, setMembers] = useState<DeviceMember[]>([]);
   const [selectedMember, setSelectedMember] = useState<DeviceMember | null>(null);
@@ -1234,8 +1258,8 @@ export default function App() {
       )}
 
       {/* 3. Mobile Floating Action Buttons (Center on me, Awake, Step GPS) */}
-      <div className={`lg:hidden fixed right-3.5 z-20 flex flex-col gap-2.5 pointer-events-auto transition-all duration-300 ${
-        mobileSheetExpanded ? 'bottom-[80dvh]' : selectedMember ? 'bottom-56' : 'bottom-44'
+      <div className={`lg:hidden fixed right-3.5 z-20 flex-col gap-2.5 pointer-events-auto transition-all duration-300 ${
+        mobileSheetExpanded ? 'hidden' : selectedMember ? 'bottom-[270px] flex' : 'bottom-48 flex'
       }`}>
         {/* Center on Me */}
         <button
@@ -1269,50 +1293,7 @@ export default function App() {
         </button>
       </div>
 
-      {/* 4. Mobile Floating Selected Member Card */}
-      {selectedMember && !mobileSheetExpanded && (
-        <div className="lg:hidden fixed left-3.5 right-3.5 bottom-36 z-20 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-2xl p-3 shadow-2xl border border-slate-200/90 dark:border-slate-800 flex items-center justify-between gap-3 animate-fade-in">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span className="text-2xl p-1.5 bg-slate-100 dark:bg-slate-800 rounded-2xl shrink-0">
-              {selectedMember.avatar || '👤'}
-            </span>
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <h4 className="font-extrabold text-xs text-slate-900 dark:text-white truncate">
-                  {selectedMember.name}
-                </h4>
-                {selectedMember.role && (
-                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold shrink-0">
-                    {selectedMember.role}
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
-                {selectedMember.currentPlace ? `At ${selectedMember.currentPlace}` : `Moving`} • {formatRelativeTime(selectedMember.lastUpdated)}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              onClick={() => setNavigatingMember(selectedMember)}
-              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-xs active:scale-95"
-            >
-              <Navigation className="w-3.5 h-3.5" />
-              <span>Go</span>
-            </button>
-            <button
-              onClick={() => setSelectedMember(null)}
-              className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
-              title="Close"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 5. Mobile Sliding Bottom Sheet & App Dock */}
+      {/* 4. Mobile Sliding Bottom Sheet & App Dock */}
       <div className="lg:hidden fixed inset-x-0 bottom-0 z-30">
         {/* Backdrop overlay when sheet is expanded */}
         {mobileSheetExpanded && (
@@ -1324,32 +1305,92 @@ export default function App() {
 
         {/* The Bottom Sheet Container */}
         <div
-          className={`relative z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-slate-200/90 dark:border-slate-800 rounded-t-3xl shadow-[0_-10px_35px_rgba(0,0,0,0.18)] transition-all duration-300 ease-out flex flex-col ${
-            mobileSheetExpanded ? 'h-[78dvh]' : 'h-auto'
+          className={`relative z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-slate-200/90 dark:border-slate-800 rounded-t-[28px] shadow-[0_-12px_40px_rgba(0,0,0,0.18)] transition-all duration-300 ease-out flex flex-col ${
+            mobileSheetExpanded ? 'h-[80dvh]' : 'h-auto'
           }`}
         >
-          {/* Drag Handle Bar */}
+          {/* Gesture-Enabled Drag Handle Bar (Touch / Swipe / Tap) */}
           <div
-            onClick={() => setMobileSheetExpanded(!mobileSheetExpanded)}
-            className="pt-2 pb-1.5 cursor-pointer flex flex-col items-center justify-center active:opacity-70 select-none"
+            onClick={() => setMobileSheetExpanded(prev => !prev)}
+            onTouchStart={handleSheetTouchStart}
+            onTouchMove={handleSheetTouchMove}
+            onTouchEnd={handleSheetTouchEnd}
+            className="pt-3 pb-2 px-6 cursor-pointer flex flex-col items-center justify-center select-none active:opacity-60 transition-opacity touch-none"
+            title="Swipe up for timeline & feed, swipe down to collapse"
           >
-            <div className="w-10 h-1 bg-slate-300 dark:bg-slate-600 rounded-full mb-1" />
-            {mobileSheetExpanded && (
-              <div className="w-full px-4 flex items-center justify-between text-xs text-slate-500 font-bold">
-                <span className="text-slate-800 dark:text-white font-extrabold text-sm">
-                  {mobileTab === 'members' ? 'Family Members' : mobileTab === 'history' ? 'Trip Timeline' : 'Check-ins Feed'}
+            <div className="w-12 h-1.5 bg-slate-300 dark:bg-slate-600 rounded-full mb-1 transition-all" />
+            <div className="flex items-center gap-1 text-[11px] font-semibold text-slate-400 dark:text-slate-500">
+              {mobileSheetExpanded ? (
+                <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400 font-bold">
+                  <ChevronDown className="w-3.5 h-3.5" /> Tap or swipe down for Map
                 </span>
-                <span className="text-blue-600 dark:text-blue-400 flex items-center gap-0.5 text-xs font-semibold">
-                  <ChevronDown className="w-3.5 h-3.5" />
-                  Map
-                </span>
-              </div>
-            )}
+              ) : (
+                <span>{selectedMember ? 'Tap or swipe up for details' : 'Swipe up for timeline & feed'}</span>
+              )}
+            </div>
           </div>
 
-          {/* PEEK MODE: Horizontal Member Avatars & Quick Actions */}
+          {/* PEEK MODE: Selected Member Card, Horizontal Avatars & Quick Actions */}
           {!mobileSheetExpanded && (
             <div className="px-3 pb-1 flex flex-col gap-2">
+              {/* Selected Member Detail Banner (Nested inside sheet - NEVER hides!) */}
+              {selectedMember && (
+                <div className="p-2.5 rounded-2xl bg-slate-100/90 dark:bg-slate-800/90 border border-slate-200/90 dark:border-slate-700/80 flex items-center justify-between gap-3 shadow-xs animate-fade-in">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="relative shrink-0">
+                      <span className="text-2xl p-1 bg-white dark:bg-slate-700 rounded-xl block shadow-xs">
+                        {selectedMember.avatar || '👤'}
+                      </span>
+                      <div className="absolute -top-0.5 -right-0.5 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white dark:border-slate-800"></div>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <h4 className="font-extrabold text-xs text-slate-900 dark:text-white truncate">
+                          {selectedMember.id === currentMember?.id ? `${selectedMember.name} (You)` : selectedMember.name}
+                        </h4>
+                        {selectedMember.role && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 font-bold shrink-0">
+                            {selectedMember.role}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate flex items-center gap-1 mt-0.5">
+                        {selectedMember.battery !== undefined && (
+                          <span className="font-semibold text-slate-700 dark:text-slate-300 shrink-0">
+                            🔋 {selectedMember.battery}% •
+                          </span>
+                        )}
+                        <span className="truncate">
+                          {selectedMember.currentPlace ? `At ${selectedMember.currentPlace}` : 'Moving'}
+                        </span>
+                        <span>•</span>
+                        <span className="shrink-0">{formatRelativeTime(selectedMember.lastUpdated)}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      onClick={() => setNavigatingMember(selectedMember)}
+                      className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-sm transition-all"
+                    >
+                      <Navigation className="w-3.5 h-3.5" />
+                      <span>Directions</span>
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedMember(null);
+                      }}
+                      className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-700 transition-colors"
+                      title="Deselect"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Horizontal Avatars Rail */}
               <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
                 {members.map(member => {
@@ -1395,7 +1436,7 @@ export default function App() {
               <div className="flex items-center justify-between px-2 pt-1 border-t border-slate-100 dark:border-slate-800/80 text-[11px] font-bold text-slate-600 dark:text-slate-300">
                 <button
                   onClick={() => setShowCheckInModal(true)}
-                  className="flex items-center gap-1.5 py-1 px-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  className="flex items-center gap-1.5 py-1 px-2.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                 >
                   <MessageSquare className="w-3.5 h-3.5 text-indigo-500" />
                   <span>Check-in</span>
@@ -1403,7 +1444,7 @@ export default function App() {
 
                 <button
                   onClick={() => setShowSafeZonesModal(true)}
-                  className="flex items-center gap-1.5 py-1 px-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  className="flex items-center gap-1.5 py-1 px-2.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                 >
                   <MapPin className="w-3.5 h-3.5 text-emerald-500" />
                   <span>Safe Places</span>
@@ -1412,7 +1453,7 @@ export default function App() {
                 {!isAppInstalled && (
                   <button
                     onClick={() => setShowInstallModal(true)}
-                    className="flex items-center gap-1.5 py-1 px-2 rounded-xl text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 font-bold transition-colors"
+                    className="flex items-center gap-1.5 py-1 px-2.5 rounded-xl text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 font-bold transition-colors"
                   >
                     <Smartphone className="w-3.5 h-3.5" />
                     <span>Install App</span>
