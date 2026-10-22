@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nexus-tracker-pwa-v2';
+const CACHE_NAME = 'nexus-tracker-pwa-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -51,7 +51,6 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(event.request)
       .then((networkResponse) => {
-        // Cache successful responses for local static files
         if (
           networkResponse &&
           networkResponse.status === 200 &&
@@ -65,7 +64,6 @@ self.addEventListener('fetch', (event) => {
         return networkResponse;
       })
       .catch(async () => {
-        // Offline fallback from cache
         const cached = await caches.match(event.request);
         if (cached) return cached;
         if (event.request.mode === 'navigate') {
@@ -76,9 +74,28 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Background sync support
+// Background Sync
 self.addEventListener('sync', (event) => {
-  if (event.tag === 'sync-location') {
-    event.waitUntil(Promise.resolve());
+  if (event.tag === 'nexus-location-sync') {
+    event.waitUntil(
+      self.clients.matchAll({ type: 'window' }).then((clients) => {
+        clients.forEach((client) => {
+          client.postMessage({ type: 'SYNC_LOCATION' });
+        });
+      })
+    );
+  }
+});
+
+// Periodic Background Sync (runs in background on Android even when app is idle)
+self.addEventListener('periodicsync', (event) => {
+  if (event.tag === 'nexus-periodic-location') {
+    event.waitUntil(
+      self.clients.matchAll({ type: 'window' }).then((clients) => {
+        clients.forEach((client) => {
+          client.postMessage({ type: 'PERIODIC_SYNC_LOCATION' });
+        });
+      })
+    );
   }
 });

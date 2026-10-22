@@ -58,6 +58,8 @@ import { TripTimeline } from './components/TripTimeline';
 import { OnboardingModal } from './components/OnboardingModal';
 import { NavigationModal } from './components/NavigationModal';
 import { InstallAppModal } from './components/InstallAppModal';
+import { BackgroundGuideModal } from './components/BackgroundGuideModal';
+import { backgroundRunner } from './utils/backgroundRunner';
 
 import { 
   Users, 
@@ -209,6 +211,34 @@ export default function App() {
   // Screen WakeLock (Trip Mode - Keeps phone screen awake while tracking)
   const [isWakeLockActive, setIsWakeLockActive] = useState<boolean>(false);
   const wakeLockRef = useRef<any>(null);
+
+  // 24/7 Background Tracking Service (Audio lock + WakeLock + MediaSession)
+  const [isBackgroundActive, setIsBackgroundActive] = useState<boolean>(false);
+  const [showBackgroundModal, setShowBackgroundModal] = useState<boolean>(false);
+
+  // Sync background runner state
+  useEffect(() => {
+    backgroundRunner.onStateChange((active) => {
+      setIsBackgroundActive(active);
+      setIsWakeLockActive(active);
+    });
+  }, []);
+
+  const toggleBackgroundTracking = async () => {
+    if (isBackgroundActive) {
+      backgroundRunner.stop();
+      setIsBackgroundActive(false);
+      setIsWakeLockActive(false);
+    } else {
+      const ok = await backgroundRunner.start();
+      if (ok) {
+        setIsBackgroundActive(true);
+        setIsWakeLockActive(true);
+      } else {
+        setShowBackgroundModal(true);
+      }
+    }
+  };
 
   // Listen for native PWA installation event
   useEffect(() => {
@@ -1389,17 +1419,17 @@ export default function App() {
           <Crosshair className="w-5 h-5" />
         </button>
 
-        {/* Trip Mode / Keep Screen Awake */}
+        {/* 24/7 Background Tracking FAB */}
         <button
-          onClick={toggleWakeLock}
+          onClick={toggleBackgroundTracking}
           className={`w-11 h-11 rounded-2xl backdrop-blur-md shadow-xl border flex items-center justify-center active:scale-90 transition-all ${
-            isWakeLockActive
-              ? 'bg-amber-500 text-white border-amber-400 shadow-amber-500/30'
+            isBackgroundActive
+              ? 'bg-emerald-500 text-white border-emerald-400 shadow-emerald-500/30'
               : 'bg-white/95 dark:bg-slate-900/95 text-slate-600 dark:text-slate-300 border-slate-200/80 dark:border-slate-800'
           }`}
-          title={isWakeLockActive ? 'Awake Active (Screen Stays On)' : 'Trip Mode (Keep Screen Awake)'}
+          title={isBackgroundActive ? '24/7 Background Tracking ACTIVE (Pocket & Screen Lock)' : 'Enable 24/7 Background GPS Tracking'}
         >
-          <Sun className={`w-5 h-5 ${isWakeLockActive ? 'animate-spin-slow' : ''}`} />
+          <Radio className={`w-5 h-5 ${isBackgroundActive ? 'animate-pulse text-white' : 'text-slate-500'}`} />
         </button>
 
         {/* Step GPS Simulator */}
