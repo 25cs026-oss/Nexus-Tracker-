@@ -61,6 +61,7 @@ import { InstallAppModal } from './components/InstallAppModal';
 import { BackgroundGuideModal } from './components/BackgroundGuideModal';
 import { backgroundRunner } from './utils/backgroundRunner';
 import { notificationManager } from './utils/notificationManager';
+import { sirenAudio } from './utils/sirenAudio';
 
 import { 
   Users, 
@@ -197,6 +198,9 @@ export default function App() {
   // Modals State
   const [showSafeZonesModal, setShowSafeZonesModal] = useState(false);
   const [showSosModal, setShowSosModal] = useState(false);
+  const [dismissedSosMemberId, setDismissedSosMemberId] = useState<string | null>(null);
+  const [isSirenMuted, setIsSirenMuted] = useState<boolean>(false);
+  const lastAlertedSosId = useRef<string | null>(null);
   const [showCheckInModal, setShowCheckInModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
@@ -1208,7 +1212,10 @@ export default function App() {
         prev.map(m => m.id === memberDocId || m.id === 'demo-you' ? { ...m, isSosActive: true } : m)
       );
     }
-    setShowSosModal(false);
+    setDismissedSosMemberId(null);
+    setIsSirenMuted(false);
+    sirenAudio.start();
+    setShowSosModal(true);
   };
 
   const handleCancelSos = async () => {
@@ -1224,6 +1231,37 @@ export default function App() {
         prev.map(m => m.id === memberDocId || m.id === 'demo-you' ? { ...m, isSosActive: false } : m)
       );
     }
+    sirenAudio.stop();
+    setShowSosModal(false);
+    setDismissedSosMemberId(null);
+    notificationManager.clearSosNotification();
+  };
+
+  // Any member or host can mark an emergency SOS as resolved/safe
+  const handleResolveSos = async (memberDocId: string) => {
+    try {
+      if (!isDemoMode && currentCircle) {
+        await updateDoc(doc(db, 'devices', memberDocId), { isSosActive: false });
+      } else {
+        setMembers(prev =>
+          prev.map(m => m.id === memberDocId || m.id === 'demo-you' ? { ...m, isSosActive: false } : m)
+        );
+      }
+      sirenAudio.stop();
+      setShowSosModal(false);
+      setDismissedSosMemberId(null);
+      notificationManager.clearSosNotification();
+    } catch (err) {
+      console.warn('Failed to resolve SOS in Firestore:', err);
+    }
+  };
+
+  const handleDismissSosModal = () => {
+    setShowSosModal(false);
+    if (activeSosMember) {
+      setDismissedSosMemberId(activeSosMember.id);
+    }
+    sirenAudio.stop();
   };
 
   // Approve a pending member (Grant permission to enter room)
@@ -1345,6 +1383,39 @@ export default function App() {
 
   const activeSosMember = members.find(m => m.isSosActive) || null;
   const isCurrentUserSos = activeSosMember?.id === `${currentCircle?.id}_${deviceId}` || (isDemoMode && activeSosMember?.id === 'demo-you');
+
+  // Real-time Emergency SOS Audio Siren & Status Bar Notification Effect
+  useEffect(() => {
+    if (activeSosMember) {
+      // If not dismissed locally, open modal
+      if (dismissedSosMemberId !== activeSosMember.id) {
+        setShowSosModal(true);
+      }
+
+      // Play emergency siren if not muted
+      if (!isSirenMuted) {
+        sirenAudio.start();
+      } else {
+        sirenAudio.stop();
+      }
+
+      // Pop high-priority notification in notification bar
+      if (lastAlertedSosId.current !== activeSosMember.id) {
+        lastAlertedSosId.current = activeSosMember.id;
+        notificationManager.showSosAlertNotification(
+          activeSosMember.name,
+          activeSosMember.currentPlace
+        );
+      }
+    } else {
+      // No active SOS in circle -> silence siren and clear states
+      sirenAudio.stop();
+      lastAlertedSosId.current = null;
+      setDismissedSosMemberId(null);
+      setIsSirenMuted(false);
+      notificationManager.clearSosNotification();
+    }
+  }, [activeSosMember, isSirenMuted, dismissedSosMemberId]);
 
   if (!currentCircle) {
     return (
@@ -1595,16 +1666,31 @@ export default function App() {
       {/* 2. Mobile SOS Alert Banner (if emergency active) */}
       {activeSosMember && (
         <div className="lg:hidden fixed top-14 inset-x-3 z-30 bg-red-600/95 text-white backdrop-blur-md rounded-2xl p-2.5 shadow-xl flex items-center justify-between text-xs font-bold animate-pulse">
-          <div className="flex items-center gap-2 truncate">
+          <div className="flex items-center gap-1.5 truncate min-w-0">
             <ShieldAlert className="w-4 h-4 shrink-0" />
             <span className="truncate">SOS: {activeSosMember.name} needs help!</span>
           </div>
-          <button
-            onClick={() => setNavigatingMember(activeSosMember)}
-            className="underline ml-2 text-white shrink-0 font-bold"
-          >
-            Navigate &rarr;
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0 ml-1">
+            <button
+              onClick={() => setIsSirenMuted(prev => !prev)}
+              className="p-1 px-1.5 rounded-lg bg-red-800 text-white text-[10px]"
+              title={isSirenMuted ? 'Unmute Siren Alarm' : 'Silence Siren'}
+            >
+              {isSirenMuted ? '🔇' : '🔊'}
+            </button>
+            <button
+              onClick={() => setShowSosModal(true)}
+              className="px-2 py-0.5 rounded-lg bg-white text-red-600 font-black text-[11px] shadow-sm"
+            >
+              Alert
+            </button>
+            <button
+              onClick={() => setNavigatingMember(activeSosMember)}
+              className="underline text-white font-bold text-[11px]"
+            >
+              Nav &rarr;
+            </button>
+          </div>
         </div>
       )}
 
@@ -2320,15 +2406,31 @@ export default function App() {
 
       {/* Emergency Active Banner */}
       {activeSosMember && (
-        <div className="hidden lg:flex bg-red-600 text-white py-2 px-4 text-center font-bold text-xs items-center justify-center gap-2 shadow-xs animate-pulse">
-          <ShieldAlert className="w-4 h-4" />
-          <span>EMERGENCY SOS: {activeSosMember.name} needs assistance!</span>
-          <button
-            onClick={() => setNavigatingMember(activeSosMember)}
-            className="underline ml-2 hover:text-red-100"
-          >
-            Open Navigation &rarr;
-          </button>
+        <div className="hidden lg:flex bg-red-600 text-white py-2 px-4 text-center font-bold text-xs items-center justify-between gap-3 shadow-xs animate-pulse">
+          <div className="flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4" />
+            <span>EMERGENCY SOS: {activeSosMember.name} needs assistance!</span>
+          </div>
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={() => setIsSirenMuted(prev => !prev)}
+              className="p-1 px-2.5 rounded-lg bg-red-800 text-white text-xs font-bold"
+            >
+              {isSirenMuted ? '🔇 Unmute Siren' : '🔊 Mute Siren'}
+            </button>
+            <button
+              onClick={() => setShowSosModal(true)}
+              className="px-2.5 py-1 rounded-lg bg-white text-red-600 font-black text-xs shadow-sm"
+            >
+              Open Alert Screen
+            </button>
+            <button
+              onClick={() => setNavigatingMember(activeSosMember)}
+              className="underline hover:text-red-100"
+            >
+              Directions &rarr;
+            </button>
+          </div>
         </div>
       )}
 
@@ -2628,11 +2730,14 @@ export default function App() {
       {/* SOS Modal */}
       <SosModal
         isOpen={showSosModal}
-        onClose={() => setShowSosModal(false)}
+        onClose={handleDismissSosModal}
         onTriggerSos={handleTriggerSos}
         onCancelSos={handleCancelSos}
+        onResolveSos={handleResolveSos}
         activeSosMember={activeSosMember}
         isCurrentUserSos={isCurrentUserSos}
+        isSirenMuted={isSirenMuted}
+        onToggleMuteSiren={() => setIsSirenMuted(prev => !prev)}
       />
 
       {/* Check In Modal */}
