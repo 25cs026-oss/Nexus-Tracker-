@@ -198,6 +198,23 @@ function MapViewController({
     } catch {}
   }, [triggerFitAll]); // STRICTLY depend on triggerFitAll, never on members!
 
+  // Invalidate map size on mount / window resize to guarantee full-screen render on mobile
+  useEffect(() => {
+    const handleResize = () => {
+      try {
+        map.invalidateSize();
+      } catch {}
+    };
+    window.addEventListener('resize', handleResize);
+    const t1 = setTimeout(handleResize, 150);
+    const t2 = setTimeout(handleResize, 500);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [map]);
+
   return null;
 }
 
@@ -226,7 +243,7 @@ export const Map: React.FC<MapProps> = ({
   }, []);
 
   return (
-    <div className="relative w-full h-full min-h-[380px] rounded-2xl overflow-hidden shadow-xs border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-900 z-0">
+    <div className="relative w-full h-full min-h-[300px] rounded-none lg:rounded-3xl overflow-hidden shadow-none lg:shadow-xs border-0 lg:border lg:border-slate-200/90 dark:lg:border-slate-800 bg-slate-100 dark:bg-slate-900 z-0">
       <MapContainer
         center={defaultCenter}
         zoom={14}
@@ -419,7 +436,7 @@ export const Map: React.FC<MapProps> = ({
       </MapContainer>
 
       {/* Floating Controls Bar (Top Right) */}
-      <div className="absolute top-3 right-3 z-[400] flex flex-col gap-2">
+      <div className="absolute top-16 lg:top-3 right-3 z-[400] flex flex-col gap-2">
         {/* Layer Switcher */}
         <div className="relative">
           <button
@@ -496,7 +513,7 @@ export const Map: React.FC<MapProps> = ({
       </div>
 
       {/* Floating Active Members Badge (Bottom Left) */}
-      <div className="absolute bottom-3 left-3 z-[400] flex items-center gap-2 px-3 py-1 bg-white/90 dark:bg-slate-900/90 backdrop-blur-xs border border-slate-200/80 dark:border-slate-700 rounded-full shadow-xs text-xs text-slate-700 dark:text-slate-300 font-medium pointer-events-none">
+      <div className="hidden lg:flex absolute bottom-3 left-3 z-[400] items-center gap-2 px-3 py-1 bg-white/90 dark:bg-slate-900/90 backdrop-blur-xs border border-slate-200/80 dark:border-slate-700 rounded-full shadow-xs text-xs text-slate-700 dark:text-slate-300 font-medium pointer-events-none">
         <span className="relative flex h-2 w-2">
           <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
         </span>

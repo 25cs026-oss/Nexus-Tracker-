@@ -76,10 +76,14 @@ import {
   Crosshair,
   LocateFixed,
   ChevronDown,
+  ChevronUp,
   CheckCircle2,
   Download,
   Smartphone,
-  Sun
+  Sun,
+  History,
+  X,
+  Map as MapIcon
 } from 'lucide-react';
 
 const DEVICE_ID_KEY = 'nexus_device_id';
@@ -134,6 +138,10 @@ export default function App() {
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>('map');
   const [copiedCode, setCopiedCode] = useState(false);
+
+  // Mobile Native App State
+  const [mobileSheetExpanded, setMobileSheetExpanded] = useState<boolean>(false);
+  const [mobileTab, setMobileTab] = useState<'members' | 'history' | 'checkins'>('members');
 
   // Live Data
   const [members, setMembers] = useState<DeviceMember[]>([]);
@@ -1082,9 +1090,560 @@ export default function App() {
   const mapFocusTarget = mapFocusOverride || (selectedMember ? { lat: selectedMember.lastLat, lng: selectedMember.lastLng } : currentCoords);
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 flex flex-col font-sans">
+    <div className="h-[100dvh] overflow-hidden relative lg:h-auto lg:min-h-screen lg:overflow-visible flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 font-sans select-none">
+
+      {/* 📱 MOBILE NATIVE EXPERIENCE (Find My / Life360 style) */}
+      
+      {/* 1. Mobile Floating Frosted Glass Header */}
+      <div className="lg:hidden fixed top-0 inset-x-0 z-30 pointer-events-none p-3 pt-safe flex items-center justify-between gap-2">
+        {/* Left: Circle Name Pill & Switcher */}
+        <div className="pointer-events-auto relative">
+          <div className="flex items-center gap-1.5 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md px-3 py-1.5 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-lg">
+            <button
+              onClick={() => setShowCircleSwitcher(!showCircleSwitcher)}
+              className="flex items-center gap-1.5 text-xs font-black text-slate-800 dark:text-slate-100 max-w-[130px] truncate"
+            >
+              <Users className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+              <span className="truncate">{currentCircle.name}</span>
+              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform ${showCircleSwitcher ? 'rotate-180' : ''}`} />
+            </button>
+
+            <span className="text-slate-300 dark:text-slate-700">|</span>
+
+            <button
+              onClick={handleCopyCode}
+              className="flex items-center gap-1 text-[11px] font-mono font-bold text-slate-600 dark:text-slate-300 active:scale-95"
+              title="Copy PIN"
+            >
+              <span>{currentCircle.id}</span>
+              {copiedCode ? (
+                <Check className="w-3 h-3 text-emerald-500" />
+              ) : (
+                <Copy className="w-3 h-3 text-slate-400" />
+              )}
+            </button>
+          </div>
+
+          {/* Circle Switcher Dropdown (Mobile) */}
+          {showCircleSwitcher && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setShowCircleSwitcher(false)}
+              />
+              <div className="absolute top-full left-0 mt-2 z-50 w-64 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-2 text-xs">
+                <div className="px-3 py-1.5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between font-bold text-slate-400 text-[10px] uppercase">
+                  <span>Your Circles</span>
+                  <span>{savedCircles.length}</span>
+                </div>
+                <div className="max-h-48 overflow-y-auto py-1 space-y-1">
+                  {savedCircles.map(c => {
+                    const isActive = c.id === currentCircle.id;
+                    return (
+                      <button
+                        key={c.id}
+                        onClick={() => {
+                          setShowCircleSwitcher(false);
+                          if (!isActive) handleSelectSavedCircle(c.id);
+                        }}
+                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left ${
+                          isActive
+                            ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-bold'
+                            : 'hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        <div className="truncate">
+                          <div className="truncate font-semibold">{c.name}</div>
+                          <div className="text-[10px] text-slate-400 font-mono">PIN: {c.id}</div>
+                        </div>
+                        {isActive && <Check className="w-4 h-4 text-blue-600 shrink-0" />}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  onClick={() => {
+                    setShowCircleSwitcher(false);
+                    setCurrentCircle(null);
+                  }}
+                  className="w-full mt-1 py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Join / Create Circle</span>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Right: GPS Pill, SOS Button, Settings */}
+        <div className="pointer-events-auto flex items-center gap-1.5">
+          {/* Live GPS Status Pill */}
+          <button
+            onClick={handleCenterOnMe}
+            className={`px-2.5 py-1.5 rounded-2xl text-[11px] font-bold flex items-center gap-1.5 shadow-md backdrop-blur-md border ${
+              gpsStatus === 'active'
+                ? 'bg-emerald-500/90 text-white border-emerald-400/80 shadow-emerald-500/20'
+                : gpsStatus === 'approximate'
+                  ? 'bg-blue-500/90 text-white border-blue-400/80'
+                  : gpsStatus === 'searching'
+                    ? 'bg-amber-500/90 text-white border-amber-400/80 animate-pulse'
+                    : 'bg-slate-800/90 text-slate-200 border-slate-700'
+            }`}
+            title="GPS Status — Tap to center on you"
+          >
+            <Radio className={`w-3 h-3 ${isTracking ? 'animate-pulse' : ''}`} />
+            <span>{gpsStatus === 'active' ? 'Live' : gpsStatus === 'approximate' ? 'City' : 'GPS'}</span>
+          </button>
+
+          {/* SOS Emergency Button */}
+          <button
+            onClick={() => setShowSosModal(true)}
+            className="px-3 py-1.5 rounded-2xl bg-red-600 hover:bg-red-700 active:scale-95 text-white text-[11px] font-black flex items-center gap-1 shadow-lg shadow-red-500/30 transition-all"
+            title="Emergency SOS"
+          >
+            <ShieldAlert className="w-3.5 h-3.5" />
+            <span>SOS</span>
+          </button>
+
+          {/* Settings Icon */}
+          <button
+            onClick={() => setShowSettingsModal(true)}
+            className="w-8 h-8 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200/80 dark:border-slate-800 shadow-lg flex items-center justify-center text-slate-700 dark:text-slate-300 active:scale-95 transition-transform"
+            title="Settings"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* 2. Mobile SOS Alert Banner (if emergency active) */}
+      {activeSosMember && (
+        <div className="lg:hidden fixed top-14 inset-x-3 z-30 bg-red-600/95 text-white backdrop-blur-md rounded-2xl p-2.5 shadow-xl flex items-center justify-between text-xs font-bold animate-pulse">
+          <div className="flex items-center gap-2 truncate">
+            <ShieldAlert className="w-4 h-4 shrink-0" />
+            <span className="truncate">SOS: {activeSosMember.name} needs help!</span>
+          </div>
+          <button
+            onClick={() => setNavigatingMember(activeSosMember)}
+            className="underline ml-2 text-white shrink-0 font-bold"
+          >
+            Navigate &rarr;
+          </button>
+        </div>
+      )}
+
+      {/* 3. Mobile Floating Action Buttons (Center on me, Awake, Step GPS) */}
+      <div className={`lg:hidden fixed right-3.5 z-20 flex flex-col gap-2.5 pointer-events-auto transition-all duration-300 ${
+        mobileSheetExpanded ? 'bottom-[80dvh]' : selectedMember ? 'bottom-56' : 'bottom-44'
+      }`}>
+        {/* Center on Me */}
+        <button
+          onClick={handleCenterOnMe}
+          className="w-11 h-11 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-md shadow-xl border border-slate-200/80 dark:border-slate-800 flex items-center justify-center text-blue-600 dark:text-blue-400 active:scale-90 transition-transform"
+          title="Center Map on Me"
+        >
+          <Crosshair className="w-5 h-5" />
+        </button>
+
+        {/* Trip Mode / Keep Screen Awake */}
+        <button
+          onClick={toggleWakeLock}
+          className={`w-11 h-11 rounded-2xl backdrop-blur-md shadow-xl border flex items-center justify-center active:scale-90 transition-all ${
+            isWakeLockActive
+              ? 'bg-amber-500 text-white border-amber-400 shadow-amber-500/30'
+              : 'bg-white/95 dark:bg-slate-900/95 text-slate-600 dark:text-slate-300 border-slate-200/80 dark:border-slate-800'
+          }`}
+          title={isWakeLockActive ? 'Awake Active (Screen Stays On)' : 'Trip Mode (Keep Screen Awake)'}
+        >
+          <Sun className={`w-5 h-5 ${isWakeLockActive ? 'animate-spin-slow' : ''}`} />
+        </button>
+
+        {/* Step GPS Simulator */}
+        <button
+          onClick={handleSimulateWalk}
+          className="w-11 h-11 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-md shadow-xl border border-slate-200/80 dark:border-slate-800 flex items-center justify-center text-emerald-600 dark:text-emerald-400 active:scale-90 transition-transform"
+          title="Step GPS Simulator"
+        >
+          <LocateFixed className="w-5 h-5" />
+        </button>
+      </div>
+
+      {/* 4. Mobile Floating Selected Member Card */}
+      {selectedMember && !mobileSheetExpanded && (
+        <div className="lg:hidden fixed left-3.5 right-3.5 bottom-36 z-20 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-2xl p-3 shadow-2xl border border-slate-200/90 dark:border-slate-800 flex items-center justify-between gap-3 animate-fade-in">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="text-2xl p-1.5 bg-slate-100 dark:bg-slate-800 rounded-2xl shrink-0">
+              {selectedMember.avatar || '👤'}
+            </span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <h4 className="font-extrabold text-xs text-slate-900 dark:text-white truncate">
+                  {selectedMember.name}
+                </h4>
+                {selectedMember.role && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold shrink-0">
+                    {selectedMember.role}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                {selectedMember.currentPlace ? `At ${selectedMember.currentPlace}` : `Moving`} • {formatRelativeTime(selectedMember.lastUpdated)}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={() => setNavigatingMember(selectedMember)}
+              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-xs active:scale-95"
+            >
+              <Navigation className="w-3.5 h-3.5" />
+              <span>Go</span>
+            </button>
+            <button
+              onClick={() => setSelectedMember(null)}
+              className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+              title="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 5. Mobile Sliding Bottom Sheet & App Dock */}
+      <div className="lg:hidden fixed inset-x-0 bottom-0 z-30">
+        {/* Backdrop overlay when sheet is expanded */}
+        {mobileSheetExpanded && (
+          <div
+            className="fixed inset-0 bg-black/50 backdrop-blur-xs z-20 transition-opacity"
+            onClick={() => setMobileSheetExpanded(false)}
+          />
+        )}
+
+        {/* The Bottom Sheet Container */}
+        <div
+          className={`relative z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-slate-200/90 dark:border-slate-800 rounded-t-3xl shadow-[0_-10px_35px_rgba(0,0,0,0.18)] transition-all duration-300 ease-out flex flex-col ${
+            mobileSheetExpanded ? 'h-[78dvh]' : 'h-auto'
+          }`}
+        >
+          {/* Drag Handle Bar */}
+          <div
+            onClick={() => setMobileSheetExpanded(!mobileSheetExpanded)}
+            className="pt-2 pb-1.5 cursor-pointer flex flex-col items-center justify-center active:opacity-70 select-none"
+          >
+            <div className="w-10 h-1 bg-slate-300 dark:bg-slate-600 rounded-full mb-1" />
+            {mobileSheetExpanded && (
+              <div className="w-full px-4 flex items-center justify-between text-xs text-slate-500 font-bold">
+                <span className="text-slate-800 dark:text-white font-extrabold text-sm">
+                  {mobileTab === 'members' ? 'Family Members' : mobileTab === 'history' ? 'Trip Timeline' : 'Check-ins Feed'}
+                </span>
+                <span className="text-blue-600 dark:text-blue-400 flex items-center gap-0.5 text-xs font-semibold">
+                  <ChevronDown className="w-3.5 h-3.5" />
+                  Map
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* PEEK MODE: Horizontal Member Avatars & Quick Actions */}
+          {!mobileSheetExpanded && (
+            <div className="px-3 pb-1 flex flex-col gap-2">
+              {/* Horizontal Avatars Rail */}
+              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
+                {members.map(member => {
+                  const isSelected = selectedMember?.id === member.id;
+                  const isCurrent = member.id === currentMember?.id;
+                  return (
+                    <button
+                      key={member.id}
+                      onClick={() => {
+                        setMapFocusOverride({ lat: member.lastLat, lng: member.lastLng });
+                        setSelectedMember(member);
+                      }}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-2xl whitespace-nowrap border transition-all shrink-0 active:scale-95 ${
+                        isSelected
+                          ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-500/20'
+                          : 'bg-slate-100/80 dark:bg-slate-800/80 border-slate-200/70 dark:border-slate-700/70 text-slate-800 dark:text-slate-200'
+                      }`}
+                    >
+                      <span className="text-lg">{member.avatar || '👤'}</span>
+                      <div className="text-left leading-tight">
+                        <div className="text-xs font-bold truncate max-w-[85px]">
+                          {isCurrent ? `${member.name} (You)` : member.name}
+                        </div>
+                        <div className={`text-[10px] ${isSelected ? 'text-blue-100' : 'text-slate-400'}`}>
+                          {member.battery !== undefined ? `🔋 ${member.battery}%` : 'Online'}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+
+                {/* Invite Chip */}
+                <button
+                  onClick={handleCopyCode}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-dashed border-blue-400 dark:border-blue-600 text-blue-600 dark:text-blue-400 text-xs font-bold whitespace-nowrap bg-blue-50/50 dark:bg-blue-950/30 shrink-0 active:scale-95"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span>+ Invite Family</span>
+                </button>
+              </div>
+
+              {/* Quick Actions Row */}
+              <div className="flex items-center justify-between px-2 pt-1 border-t border-slate-100 dark:border-slate-800/80 text-[11px] font-bold text-slate-600 dark:text-slate-300">
+                <button
+                  onClick={() => setShowCheckInModal(true)}
+                  className="flex items-center gap-1.5 py-1 px-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                >
+                  <MessageSquare className="w-3.5 h-3.5 text-indigo-500" />
+                  <span>Check-in</span>
+                </button>
+
+                <button
+                  onClick={() => setShowSafeZonesModal(true)}
+                  className="flex items-center gap-1.5 py-1 px-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                >
+                  <MapPin className="w-3.5 h-3.5 text-emerald-500" />
+                  <span>Safe Places</span>
+                </button>
+
+                {!isAppInstalled && (
+                  <button
+                    onClick={() => setShowInstallModal(true)}
+                    className="flex items-center gap-1.5 py-1 px-2 rounded-xl text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 font-bold transition-colors"
+                  >
+                    <Smartphone className="w-3.5 h-3.5" />
+                    <span>Install App</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* EXPANDED MODE: Full Tabs & Content */}
+          {mobileSheetExpanded && (
+            <div className="flex-1 flex flex-col min-h-0">
+              {/* Sub-tabs bar */}
+              <div className="flex bg-slate-100 dark:bg-slate-800/90 p-1 mx-4 my-1 rounded-2xl shrink-0">
+                <button
+                  onClick={() => setMobileTab('members')}
+                  className={`flex-1 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                    mobileTab === 'members'
+                      ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-xs'
+                      : 'text-slate-500 dark:text-slate-400'
+                  }`}
+                >
+                  Members ({members.length})
+                </button>
+                <button
+                  onClick={() => setMobileTab('history')}
+                  className={`flex-1 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                    mobileTab === 'history'
+                      ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-xs'
+                      : 'text-slate-500 dark:text-slate-400'
+                  }`}
+                >
+                  Timeline
+                </button>
+                <button
+                  onClick={() => setMobileTab('checkins')}
+                  className={`flex-1 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                    mobileTab === 'checkins'
+                      ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-xs'
+                      : 'text-slate-500 dark:text-slate-400'
+                  }`}
+                >
+                  Feed ({checkIns.length})
+                </button>
+              </div>
+
+              {/* Scrollable Content */}
+              <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2.5">
+                {mobileTab === 'members' && (
+                  <>
+                    <div className="p-3 bg-blue-50/70 dark:bg-blue-950/40 rounded-2xl border border-blue-100 dark:border-blue-900/40 text-xs text-blue-900 dark:text-blue-200 flex items-center justify-between">
+                      <div>
+                        <span className="font-bold">Circle PIN:</span>
+                        <span className="font-mono font-bold ml-1.5">{currentCircle.id}</span>
+                      </div>
+                      <button
+                        onClick={handleCopyCode}
+                        className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold"
+                      >
+                        {copiedCode ? 'Copied' : 'Share Invite'}
+                      </button>
+                    </div>
+
+                    {members.map(member => (
+                      <FamilyMemberCard
+                        key={member.id}
+                        member={member}
+                        currentUser={currentMember}
+                        isSelected={selectedMember?.id === member.id}
+                        onSelect={(m) => {
+                          setMapFocusOverride(null);
+                          setSelectedMember(m);
+                          setMobileSheetExpanded(false);
+                        }}
+                        onNavigate={(m) => setNavigatingMember(m)}
+                        onDelete={(id) => handleDeleteMember(id)}
+                      />
+                    ))}
+                  </>
+                )}
+
+                {mobileTab === 'history' && (
+                  selectedMember ? (
+                    <TripTimeline
+                      member={selectedMember}
+                      history={history}
+                      onClearHistory={handleClearHistory}
+                      isCurrentUser={selectedMember.id === `${currentCircle.id}_${deviceId}` || selectedMember.id === 'demo-you'}
+                    />
+                  ) : (
+                    <div className="text-center py-10 px-4 bg-slate-50 dark:bg-slate-800/40 rounded-2xl text-xs text-slate-500">
+                      Tap any family member above to view their live journey timeline!
+                    </div>
+                  )
+                )}
+
+                {mobileTab === 'checkins' && (
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
+                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">Family Updates</span>
+                      <button
+                        onClick={() => setShowCheckInModal(true)}
+                        className="px-3 py-1 bg-indigo-600 text-white rounded-xl text-xs font-semibold flex items-center gap-1"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Post</span>
+                      </button>
+                    </div>
+
+                    {checkIns.length === 0 ? (
+                      <div className="text-center py-8 text-xs text-slate-400">
+                        No recent check-in updates. Tap "Post" to send an update!
+                      </div>
+                    ) : (
+                      checkIns.map((item) => (
+                        <div
+                          key={item.id}
+                          className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 flex items-start gap-3"
+                        >
+                          <span className="text-xl p-1 bg-white dark:bg-slate-800 rounded-xl">
+                            {item.avatar || '👤'}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                                {item.memberName}
+                              </span>
+                              <span className="text-[10px] text-slate-400">
+                                {formatRelativeTime(item.timestamp)}
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-700 dark:text-slate-300 mt-0.5">
+                              {item.message}
+                            </p>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* BOTTOM DOCK BAR (Fixed navigation across Map, Family, Timeline, Feed, Places) */}
+          <div className="border-t border-slate-200/80 dark:border-slate-800/80 px-2 py-1.5 flex items-center justify-around bg-white/95 dark:bg-slate-900/95 backdrop-blur-md pb-safe">
+            {/* Map Tab */}
+            <button
+              onClick={() => setMobileSheetExpanded(false)}
+              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl transition-all ${
+                !mobileSheetExpanded
+                  ? 'text-blue-600 dark:text-blue-400 font-bold scale-105'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
+              }`}
+            >
+              <MapIcon className="w-4 h-4" />
+              <span className="text-[10px]">Map</span>
+            </button>
+
+            {/* Family Tab */}
+            <button
+              onClick={() => {
+                setMobileTab('members');
+                setMobileSheetExpanded(true);
+              }}
+              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl relative transition-all ${
+                mobileSheetExpanded && mobileTab === 'members'
+                  ? 'text-blue-600 dark:text-blue-400 font-bold scale-105'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
+              }`}
+            >
+              <Users className="w-4 h-4" />
+              <span className="text-[10px]">Family</span>
+              {members.length > 0 && (
+                <span className="absolute top-0 right-2 w-3.5 h-3.5 bg-blue-600 text-white rounded-full text-[8px] flex items-center justify-center font-bold">
+                  {members.length}
+                </span>
+              )}
+            </button>
+
+            {/* Timeline Tab */}
+            <button
+              onClick={() => {
+                setMobileTab('history');
+                setMobileSheetExpanded(true);
+              }}
+              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl transition-all ${
+                mobileSheetExpanded && mobileTab === 'history'
+                  ? 'text-blue-600 dark:text-blue-400 font-bold scale-105'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
+              }`}
+            >
+              <History className="w-4 h-4" />
+              <span className="text-[10px]">Timeline</span>
+            </button>
+
+            {/* Feed Tab */}
+            <button
+              onClick={() => {
+                setMobileTab('checkins');
+                setMobileSheetExpanded(true);
+              }}
+              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl relative transition-all ${
+                mobileSheetExpanded && mobileTab === 'checkins'
+                  ? 'text-blue-600 dark:text-blue-400 font-bold scale-105'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
+              }`}
+            >
+              <MessageSquare className="w-4 h-4" />
+              <span className="text-[10px]">Feed</span>
+              {checkIns.length > 0 && (
+                <span className="absolute top-0 right-2 w-3.5 h-3.5 bg-indigo-600 text-white rounded-full text-[8px] flex items-center justify-center font-bold">
+                  {checkIns.length}
+                </span>
+              )}
+            </button>
+
+            {/* Safe Places */}
+            <button
+              onClick={() => setShowSafeZonesModal(true)}
+              className="flex flex-col items-center gap-1 py-1 px-3 rounded-xl text-slate-500 dark:text-slate-400 hover:text-slate-800 transition-all"
+            >
+              <MapPin className="w-4 h-4" />
+              <span className="text-[10px]">Places</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Top Application Header */}
-      <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xs border-b border-slate-200/90 dark:border-slate-800 px-4 py-2.5">
+      <header className="hidden lg:block sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xs border-b border-slate-200/90 dark:border-slate-800 px-4 py-2.5">
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
           {/* Left: Circle Name & Code with Dropdown Switcher */}
           <div className="relative">
@@ -1301,7 +1860,7 @@ export default function App() {
       </header>
 
       {/* Live GPS Feedback Strip */}
-      <div className={`px-4 py-1.5 text-xs font-semibold flex items-center justify-between border-b ${
+      <div className={`hidden lg:flex px-4 py-1.5 text-xs font-semibold items-center justify-between border-b ${
         gpsStatus === 'active' 
           ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900'
           : gpsStatus === 'approximate'
@@ -1330,7 +1889,7 @@ export default function App() {
 
       {/* Emergency Active Banner */}
       {activeSosMember && (
-        <div className="bg-red-600 text-white py-2 px-4 text-center font-bold text-xs flex items-center justify-center gap-2 shadow-xs animate-pulse">
+        <div className="hidden lg:flex bg-red-600 text-white py-2 px-4 text-center font-bold text-xs items-center justify-center gap-2 shadow-xs animate-pulse">
           <ShieldAlert className="w-4 h-4" />
           <span>EMERGENCY SOS: {activeSosMember.name} needs assistance!</span>
           <button
@@ -1343,12 +1902,12 @@ export default function App() {
       )}
 
       {/* Main Workspace */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
+      <main className="flex-1 w-full lg:max-w-7xl lg:mx-auto lg:p-5 lg:grid lg:grid-cols-12 lg:gap-5">
         {/* Left Column: Interactive Map (8 cols on desktop) */}
-        <div className="lg:col-span-8 flex flex-col gap-3.5">
+        <div className="fixed inset-0 z-0 lg:static lg:inset-auto lg:z-auto lg:col-span-8 flex flex-col lg:gap-3.5">
           {/* Selected Member Quick Info Card */}
           {selectedMember && (
-            <div className="p-3 bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-3xl flex items-center justify-between gap-3 shadow-xs">
+            <div className="hidden lg:flex p-3 bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-3xl items-center justify-between gap-3 shadow-xs">
               <div className="flex items-center gap-3">
                 <span className="text-2xl p-1.5 bg-slate-100 dark:bg-slate-800 rounded-2xl shadow-inner">
                   {selectedMember.avatar || '👤'}
@@ -1399,7 +1958,7 @@ export default function App() {
           )}
 
           {/* Optimized Leaflet Map */}
-          <div className="flex-1 min-h-[420px] rounded-3xl overflow-hidden shadow-xs">
+          <div className="w-full h-full lg:flex-1 lg:min-h-[580px] lg:rounded-3xl overflow-hidden shadow-xs">
             <Map
               members={members}
               selectedMember={selectedMember}
@@ -1421,7 +1980,7 @@ export default function App() {
         </div>
 
         {/* Right Column: Family Members, Timeline, Feed (4 cols) */}
-        <div className="lg:col-span-4 flex flex-col gap-3.5">
+        <div className="hidden lg:flex lg:col-span-4 flex-col gap-3.5">
           {/* Navigation Sub-tabs */}
           <div className="flex bg-slate-200/70 dark:bg-slate-800/80 p-1 rounded-2xl">
             <button
