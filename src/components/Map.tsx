@@ -1,170 +1,385 @@
-import React from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
+import React, { useEffect, useState, useMemo } from 'react';
+import { 
+  MapContainer, 
+  TileLayer, 
+  Marker, 
+  Popup, 
+  Polyline, 
+  Circle, 
+  useMap 
+} from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-
-// Custom futuristic icon
-const nexusIcon = L.divIcon({
-  className: 'custom-nexus-icon',
-  html: `<div class="w-4 h-4 bg-[#00f2ff] rounded-full border-2 border-white shadow-[0_0_10px_#00f2ff] animate-pulse"></div>`,
-  iconSize: [16, 16],
-  iconAnchor: [8, 8]
-});
+import { DeviceMember, SafeZone, HistoryPoint } from '../types';
+import { formatRelativeTime, formatSpeed, getDirectionsUrl } from '../utils/geo';
+import { 
+  Crosshair, 
+  Navigation, 
+  Layers, 
+  Battery, 
+  BatteryCharging, 
+  AlertTriangle,
+  ExternalLink,
+  MapPin
+} from 'lucide-react';
 
 interface MapProps {
-  locations: { lat: number; lng: number; id: string }[];
-  history: { lat: number; lng: number }[];
+  members: DeviceMember[];
+  selectedMember: DeviceMember | null;
+  onSelectMember: (member: DeviceMember) => void;
+  safeZones: SafeZone[];
+  history: HistoryPoint[];
+  currentUserId?: string;
   focusLocation?: { lat: number; lng: number } | null;
+  theme?: 'light' | 'dark' | 'midnight';
 }
 
-// Component to handle manual map controls
-const MapControls = ({ focusLocation }: { focusLocation?: { lat: number; lng: number } | null }) => {
-  const map = useMap();
-  const [isLocked, setIsLocked] = React.useState(false);
-
-  React.useEffect(() => {
-    if (focusLocation && !isLocked) {
-      map.setView([focusLocation.lat, focusLocation.lng], 15, { animate: true });
-    }
-  }, [focusLocation, map, isLocked]);
-
-  return (
-    <div className="leaflet-top leaflet-right flex flex-col gap-2" style={{ marginTop: '80px', marginRight: '10px' }}>
-      <div className="leaflet-control leaflet-bar border-none bg-transparent flex flex-col gap-2">
-        {/* Recenter Button */}
-        <button 
-          onClick={() => {
-            if (focusLocation) {
-              map.setView([focusLocation.lat, focusLocation.lng], 15, { animate: true });
-            }
-          }}
-          className="bg-[#0a0a0a] text-[#00f2ff] p-2 hover:bg-[#00f2ff]/20 border border-[#00f2ff]/30 rounded shadow-lg flex items-center justify-center transition-all"
-          title="RECENTER ON SELECTED"
-          style={{ width: '34px', height: '34px', cursor: 'pointer' }}
-        >
-          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-            <circle cx="12" cy="12" r="3"></circle>
-          </svg>
-        </button>
-
-        {/* Lock Toggle */}
-        <button 
-          onClick={() => setIsLocked(!isLocked)}
-          className={`p-2 border rounded shadow-lg flex items-center justify-center transition-all ${
-            isLocked 
-              ? 'bg-red-500/20 text-red-500 border-red-500/50' 
-              : 'bg-[#0a0a0a] text-[#00f2ff] border-[#00f2ff]/30 hover:bg-[#00f2ff]/10'
-          }`}
-          title={isLocked ? "VIEW LOCKED" : "VIEW UNLOCKED"}
-          style={{ width: '34px', height: '34px', cursor: 'pointer' }}
-        >
-          {isLocked ? (
-            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-            </svg>
-          ) : (
-            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-              <path d="M7 11V7a5 5 0 0 1 9.9-1"></path>
-            </svg>
-          )}
-        </button>
-      </div>
-    </div>
-  );
+// Tile Layer Providers
+const TILE_LAYERS = {
+  streets: {
+    name: 'Streets',
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+  },
+  satellite: {
+    name: 'Satellite',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attribution: '&copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye'
+  },
+  dark: {
+    name: 'Modern Dark',
+    url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+    attribution: '&copy; CARTO'
+  }
 };
 
-export const Map: React.FC<MapProps> = ({ locations, history, focusLocation }) => {
-  const defaultCenter: [number, number] = focusLocation 
-    ? [focusLocation.lat, focusLocation.lng]
-    : locations.length > 0 
-      ? [locations[0].lat, locations[0].lng] 
-      : [20, 0];
+// Creates a rich custom HTML Leaflet marker for a family member
+function createFamilyMarkerIcon(
+  member: DeviceMember, 
+  isSelected: boolean,
+  isCurrentUser: boolean
+) {
+  const avatar = member.avatar || (member.name ? member.name.charAt(0).toUpperCase() : '👤');
+  const isSos = member.isSosActive;
+  const isOnline = Date.now() - (member.lastUpdated?.toMillis?.() || new Date(member.lastUpdated).getTime() || 0) < 180000;
+
+  const borderColor = isSos 
+    ? '#ef4444' 
+    : isSelected 
+      ? '#3b82f6' 
+      : isCurrentUser 
+        ? '#10b981' 
+        : '#6366f1';
+
+  const pulseEffect = isSos
+    ? '<div class="absolute -inset-2 rounded-full bg-red-500/40 animate-ping"></div>'
+    : isSelected
+      ? '<div class="absolute -inset-1.5 rounded-full bg-blue-500/30 animate-pulse"></div>'
+      : '';
+
+  const statusBadge = isSos
+    ? '<div class="absolute -top-1 -right-1 w-4 h-4 bg-red-600 rounded-full flex items-center justify-center text-[9px] text-white font-bold border-2 border-white">!</div>'
+    : member.isCharging
+      ? '<div class="absolute -top-1 -right-1 w-3.5 h-3.5 bg-amber-500 rounded-full flex items-center justify-center text-[8px] text-white border border-white">⚡</div>'
+      : isOnline
+        ? '<div class="absolute -top-0.5 -right-0.5 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white"></div>'
+        : '';
+
+  const html = `
+    <div class="relative group cursor-pointer flex flex-col items-center">
+      ${pulseEffect}
+      <div 
+        class="w-10 h-10 rounded-full bg-white shadow-lg flex items-center justify-center text-lg font-bold border-2 transition-transform transform hover:scale-110"
+        style="border-color: ${borderColor}; box-shadow: 0 4px 14px rgba(0,0,0,0.25);"
+      >
+        <span class="select-none">${avatar}</span>
+        ${statusBadge}
+      </div>
+      <div class="mt-1 px-2 py-0.5 bg-slate-900/85 backdrop-blur-sm text-white text-[10px] font-semibold rounded-full shadow-md whitespace-nowrap pointer-events-none flex items-center gap-1 border border-white/20">
+        <span>${member.name || 'Member'}</span>
+        ${member.battery !== undefined ? `<span class="text-[9px] opacity-80">(${member.battery}%)</span>` : ''}
+      </div>
+    </div>
+  `;
+
+  return L.divIcon({
+    className: 'custom-family-marker',
+    html,
+    iconSize: [44, 60],
+    iconAnchor: [22, 30],
+    popupAnchor: [0, -32]
+  });
+}
+
+// Controller for bounds fitting and centering
+function MapViewController({
+  members,
+  focusLocation,
+  triggerFitAll
+}: {
+  members: DeviceMember[];
+  focusLocation?: { lat: number; lng: number } | null;
+  triggerFitAll: number;
+}) {
+  const map = useMap();
+
+  // Smooth pan/zoom when focusLocation changes
+  useEffect(() => {
+    if (focusLocation && !isNaN(focusLocation.lat) && !isNaN(focusLocation.lng)) {
+      map.setView([focusLocation.lat, focusLocation.lng], 16, { animate: true, duration: 1 });
+    }
+  }, [focusLocation, map]);
+
+  // Fit all markers when requested or on initial load with members
+  useEffect(() => {
+    if (members.length === 0) return;
+
+    if (members.length === 1) {
+      map.setView([members[0].lastLat, members[0].lastLng], 15, { animate: true });
+      return;
+    }
+
+    const bounds = L.latLngBounds(members.map(m => [m.lastLat, m.lastLng]));
+    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16, animate: true });
+  }, [triggerFitAll, map]);
+
+  return null;
+}
+
+export const Map: React.FC<MapProps> = ({
+  members,
+  selectedMember,
+  onSelectMember,
+  safeZones,
+  history,
+  currentUserId,
+  focusLocation,
+  theme = 'light'
+}) => {
+  const [activeLayer, setActiveLayer] = useState<'streets' | 'satellite' | 'dark'>('streets');
+  const [triggerFit, setTriggerFit] = useState(0);
+
+  // Compute default center
+  const defaultCenter = useMemo<[number, number]>(() => {
+    if (focusLocation) return [focusLocation.lat, focusLocation.lng];
+    if (selectedMember) return [selectedMember.lastLat, selectedMember.lastLng];
+    if (members.length > 0) return [members[0].lastLat, members[0].lastLng];
+    return [37.7749, -122.4194]; // Default friendly city center
+  }, []);
 
   return (
-    <div className="relative w-full aspect-[16/10] bg-[#050505] rounded-xl border border-[#00f2ff]/20 overflow-hidden z-0">
-      <MapContainer 
-        center={defaultCenter} 
-        zoom={13} 
+    <div className="relative w-full h-full min-h-[420px] rounded-2xl overflow-hidden shadow-sm border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-900 z-0">
+      <MapContainer
+        center={defaultCenter}
+        zoom={14}
         scrollWheelZoom={true}
-        className="w-full h-full"
-        style={{ background: '#050505' }}
+        className="w-full h-full min-h-[420px]"
+        zoomControl={false}
       >
-        {/* Futuristic Dark Tiles */}
+        {/* Active Tile Layer */}
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          attribution={TILE_LAYERS[activeLayer].attribution}
+          url={TILE_LAYERS[activeLayer].url}
         />
-        
-        <MapControls focusLocation={focusLocation} />
 
-        {/* History Path */}
+        <MapViewController
+          members={members}
+          focusLocation={focusLocation}
+          triggerFitAll={triggerFit}
+        />
+
+        {/* Safe Zones Geofences */}
+        {safeZones.map(zone => (
+          <React.Fragment key={zone.id}>
+            <Circle
+              center={[zone.lat, zone.lng]}
+              radius={zone.radius}
+              pathOptions={{
+                color: '#10b981',
+                fillColor: '#10b981',
+                fillOpacity: 0.15,
+                weight: 2,
+                dashArray: '4, 6'
+              }}
+            >
+              <Popup className="zone-popup">
+                <div className="p-2 text-slate-800 dark:text-white font-sans text-xs">
+                  <div className="font-bold flex items-center gap-1.5 text-sm">
+                    <span>{zone.icon}</span>
+                    <span>{zone.name}</span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    Safe Zone Radius: {zone.radius}m
+                  </div>
+                </div>
+              </Popup>
+            </Circle>
+          </React.Fragment>
+        ))}
+
+        {/* Selected Member Travel History Line */}
         {history.length > 1 && (
-          <Polyline 
-            positions={history.map(h => [h.lat, h.lng])} 
-            color="#00f2ff" 
-            weight={2} 
-            opacity={0.6}
-            dashArray="5, 10"
+          <Polyline
+            positions={history.map(h => [h.lat, h.lng])}
+            color="#3b82f6"
+            weight={4}
+            opacity={0.8}
+            dashArray="6, 8"
           />
         )}
 
-        {/* Device Markers */}
-        {locations.map((loc) => (
-          <Marker 
-            key={loc.id} 
-            position={[loc.lat, loc.lng]} 
-            icon={nexusIcon}
-          >
-            <Popup className="futuristic-popup">
-              <div className="bg-[#0a0a0a] text-[#00f2ff] p-2 font-mono text-xs border border-[#00f2ff]/30 rounded">
-                <div className="font-bold border-b border-[#00f2ff]/20 mb-1 pb-1">{loc.id}</div>
-                <div>LAT: {loc.lat.toFixed(6)}</div>
-                <div>LNG: {loc.lng.toFixed(6)}</div>
-              </div>
-            </Popup>
-          </Marker>
-        ))}
+        {/* Family Member Markers */}
+        {members.map(member => {
+          const isSelected = selectedMember?.id === member.id;
+          const isCurrentUser = member.id === currentUserId;
+          const icon = createFamilyMarkerIcon(member, isSelected, isCurrentUser);
 
-        {/* Radar Scanning Effect */}
-        <div className="absolute inset-0 pointer-events-none z-[400] overflow-hidden">
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[200%] h-[200%] border border-[#00f2ff]/5 rounded-full animate-[spin_10s_linear_infinite]" 
-               style={{ background: 'conic-gradient(from 0deg, transparent 0deg, rgba(0, 242, 255, 0.05) 90deg, transparent 100deg)' }} />
-        </div>
+          return (
+            <Marker
+              key={member.id}
+              position={[member.lastLat, member.lastLng]}
+              icon={icon}
+              eventHandlers={{
+                click: () => onSelectMember(member)
+              }}
+            >
+              <Popup className="member-popup" closeButton={false}>
+                <div className="p-3 text-slate-800 dark:text-slate-100 font-sans min-w-[210px]">
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">{member.avatar || '👤'}</span>
+                      <div>
+                        <h4 className="font-bold text-sm leading-tight">{member.name}</h4>
+                        {member.role && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-medium">
+                            {member.role}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {isCurrentUser && (
+                      <span className="text-[10px] bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400 font-semibold px-2 py-0.5 rounded-full">
+                        You
+                      </span>
+                    )}
+                  </div>
+
+                  {member.isSosActive && (
+                    <div className="my-2 p-2 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 rounded-lg flex items-center gap-2 text-red-600 dark:text-red-400 text-xs font-bold animate-pulse">
+                      <AlertTriangle className="w-4 h-4 shrink-0" />
+                      <span>EMERGENCY SOS ALERT!</span>
+                    </div>
+                  )}
+
+                  <div className="mt-2 space-y-1 text-xs text-slate-600 dark:text-slate-300">
+                    {member.currentPlace ? (
+                      <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium">
+                        <MapPin className="w-3.5 h-3.5" />
+                        <span>At {member.currentPlace}</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <Navigation className="w-3.5 h-3.5 text-slate-400" />
+                        <span>{formatSpeed(member.speed)}</span>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between pt-1">
+                      <div className="flex items-center gap-1">
+                        {member.isCharging ? (
+                          <BatteryCharging className="w-3.5 h-3.5 text-amber-500" />
+                        ) : (
+                          <Battery className="w-3.5 h-3.5 text-emerald-500" />
+                        )}
+                        <span>{member.battery ?? '--'}%</span>
+                      </div>
+                      <span className="text-[11px] text-slate-400">
+                        {formatRelativeTime(member.lastUpdated)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800 flex gap-2">
+                    <a
+                      href={getDirectionsUrl(member.lastLat, member.lastLng)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex-1 py-1.5 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-1 transition-colors shadow-sm"
+                    >
+                      <Navigation className="w-3.5 h-3.5" />
+                      <span>Directions</span>
+                      <ExternalLink className="w-3 h-3 ml-0.5 opacity-70" />
+                    </a>
+                  </div>
+                </div>
+              </Popup>
+            </Marker>
+          );
+        })}
       </MapContainer>
 
-      {/* Futuristic Overlay Grid */}
-      <div className="absolute inset-0 pointer-events-none opacity-10 z-[400]" 
-           style={{ backgroundImage: 'linear-gradient(#00f2ff 1px, transparent 1px), linear-gradient(90deg, #00f2ff 1px, transparent 1px)', backgroundSize: '40px 40px' }} />
-      
-      <style>{`
-        .leaflet-container {
-          background: #050505 !important;
-        }
-        .leaflet-popup-content-wrapper, .leaflet-popup-tip {
-          background: #0a0a0a !important;
-          color: #00f2ff !important;
-          border: 1px solid rgba(0, 242, 255, 0.3);
-          border-radius: 8px;
-        }
-        .leaflet-popup-content {
-          margin: 8px;
-        }
-        .leaflet-control-zoom-in, .leaflet-control-zoom-out {
-          background: #0a0a0a !important;
-          color: #00f2ff !important;
-          border: 1px solid rgba(0, 242, 255, 0.3) !important;
-        }
-        .leaflet-control-attribution {
-          background: rgba(0, 0, 0, 0.7) !important;
-          color: rgba(0, 242, 255, 0.4) !important;
-        }
-        .leaflet-control-attribution a {
-          color: rgba(0, 242, 255, 0.6) !important;
-        }
-      `}</style>
+      {/* Floating Floating Controls Bar (Top Right) */}
+      <div className="absolute top-4 right-4 z-[400] flex flex-col gap-2">
+        {/* Layer Switcher */}
+        <div className="relative group">
+          <button
+            className="w-10 h-10 bg-white/95 dark:bg-slate-800/95 backdrop-blur-sm text-slate-700 dark:text-slate-200 rounded-xl shadow-lg border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all hover:scale-105"
+            title="Change Map Style"
+          >
+            <Layers className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+          </button>
+          <div className="absolute right-0 top-12 hidden group-hover:flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl p-1.5 gap-1 min-w-[130px] z-50">
+            <button
+              onClick={() => setActiveLayer('streets')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
+                activeLayer === 'streets' 
+                  ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
+                  : 'hover:bg-slate-50 dark:hover:bg-slate-700/50 text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              🗺️ Standard
+            </button>
+            <button
+              onClick={() => setActiveLayer('satellite')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
+                activeLayer === 'satellite' 
+                  ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
+                  : 'hover:bg-slate-50 dark:hover:bg-slate-700/50 text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              🛰️ Satellite
+            </button>
+            <button
+              onClick={() => setActiveLayer('dark')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
+                activeLayer === 'dark' 
+                  ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
+                  : 'hover:bg-slate-50 dark:hover:bg-slate-700/50 text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              🌙 Voyager
+            </button>
+          </div>
+        </div>
+
+        {/* Fit All Members */}
+        <button
+          onClick={() => setTriggerFit(prev => prev + 1)}
+          className="w-10 h-10 bg-white/95 dark:bg-slate-800/95 backdrop-blur-sm text-slate-700 dark:text-slate-200 rounded-xl shadow-lg border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all hover:scale-105"
+          title="Fit All Family Members"
+        >
+          <Crosshair className="w-5 h-5 text-slate-700 dark:text-slate-200" />
+        </button>
+      </div>
+
+      {/* Floating Active Members Badge (Bottom Left) */}
+      <div className="absolute bottom-4 left-4 z-[400] flex items-center gap-2 px-3 py-1.5 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border border-slate-200/80 dark:border-slate-700 rounded-full shadow-md text-xs text-slate-700 dark:text-slate-300 font-medium pointer-events-none">
+        <span className="relative flex h-2.5 w-2.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+        </span>
+        <span>{members.length} {members.length === 1 ? 'member' : 'members'} online</span>
+      </div>
     </div>
   );
 };

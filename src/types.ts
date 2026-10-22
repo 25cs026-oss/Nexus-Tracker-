@@ -1,0 +1,71 @@
+export type MemberRole = 'Mom' | 'Dad' | 'Son' | 'Daughter' | 'Grandparent' | 'Partner' | 'Friend' | 'Pet' | 'Other';
+
+export interface GridCircle {
+  id: string; // The PIN / Invite Code
+  name: string;
+  createdAt: any;
+  ownerId?: string;
+  safeZones?: SafeZone[];
+}
+
+export interface DeviceMember {
+  id: string;
+  name: string;
+  role?: MemberRole;
+  avatar?: string; // emoji or icon name
+  lastLat: number;
+  lastLng: number;
+  lastUpdated: any;
+  gridId: string;
+  battery?: number;
+  isCharging?: boolean;
+  speed?: number; // km/h or m/s
+  accuracy?: number; // meters
+  signal?: number;
+  isSosActive?: boolean;
+  sosMessage?: string;
+  statusMessage?: string;
+  statusUpdatedAt?: any;
+  currentPlace?: string; // Name of safe zone if inside
+  isSharingPaused?: boolean;
+}
+
+export interface SafeZone {
+  id: string;
+  name: string;
+  icon: string; // emoji e.g. 🏠, 🏫, 🏢, 🏥, 🌳
+  lat: number;
+  lng: number;
+  radius: number; // in meters (e.g. 200m)
+}
+
+export interface HistoryPoint {
+  lat: number;
+  lng: number;
+  timestamp: any;
+  accuracy?: number;
+  speed?: number;
+  placeName?: string;
+}
+
+export interface CheckInPing {
+  id: string;
+  deviceId: string;
+  memberName: string;
+  avatar: string;
+  message: string;
+  timestamp: any;
+  lat?: number;
+  lng?: number;
+  place?: string;
+}
+
+export interface SystemLog {
+  id: string;
+  message: string;
+  timestamp: Date | string | number;
+  type: 'info' | 'warning' | 'error' | 'success';
+}
+
+export type ActiveTab = 'map' | 'members' | 'places' | 'history' | 'checkins';
+export type AppTheme = 'light' | 'dark' | 'midnight';
