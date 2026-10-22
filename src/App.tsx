@@ -29,6 +29,7 @@ import {
   limit, 
   getDocs, 
   serverTimestamp, 
+  deleteDoc,
   writeBatch 
 } from './firebase';
 import { 
@@ -659,6 +660,21 @@ export default function App() {
     }
   };
 
+  // Delete/Remove member from circle
+  const handleDeleteMember = async (memberId: string) => {
+    setMembers(prev => prev.filter(m => m.id !== memberId));
+    if (selectedMember?.id === memberId) {
+      setSelectedMember(null);
+    }
+    if (!isDemoMode && currentCircle) {
+      try {
+        await deleteDoc(doc(db, 'devices', memberId));
+      } catch (err) {
+        console.warn('Could not delete member doc:', err);
+      }
+    }
+  };
+
   // Check-In handler
   const handleSendCheckIn = async (message: string) => {
     if (!currentCircle) return;
@@ -1074,6 +1090,7 @@ export default function App() {
                       setSelectedMember(m);
                     }}
                     onNavigate={(m) => setNavigatingMember(m)}
+                    onDelete={(id) => handleDeleteMember(id)}
                   />
                 ))
               )}

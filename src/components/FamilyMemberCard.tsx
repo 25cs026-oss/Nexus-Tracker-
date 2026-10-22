@@ -12,7 +12,8 @@ import {
   BatteryWarning, 
   Navigation, 
   MapPin, 
-  AlertTriangle
+  AlertTriangle,
+  Trash2
 } from 'lucide-react';
 
 interface FamilyMemberCardProps {
@@ -21,6 +22,7 @@ interface FamilyMemberCardProps {
   isSelected: boolean;
   onSelect: (member: DeviceMember) => void;
   onNavigate?: (member: DeviceMember) => void;
+  onDelete?: (memberId: string) => void;
 }
 
 export const FamilyMemberCard: React.FC<FamilyMemberCardProps> = ({
@@ -28,7 +30,8 @@ export const FamilyMemberCard: React.FC<FamilyMemberCardProps> = ({
   currentUser,
   isSelected,
   onSelect,
-  onNavigate
+  onNavigate,
+  onDelete
 }) => {
   const isSelf = currentUser?.id === member.id;
   
@@ -153,18 +156,35 @@ export const FamilyMemberCard: React.FC<FamilyMemberCardProps> = ({
             {formatRelativeTime(member.lastUpdated)}
           </span>
 
-          {onNavigate && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onNavigate(member);
-              }}
-              className="mt-2.5 p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-950 transition-colors"
-              title="Get Directions"
-            >
-              <Navigation className="w-3.5 h-3.5" />
-            </button>
-          )}
+          <div className="flex items-center gap-1 mt-2.5">
+            {onNavigate && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onNavigate(member);
+                }}
+                className="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-950 transition-colors"
+                title="Get Directions"
+              >
+                <Navigation className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            {!isSelf && onDelete && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (window.confirm(`Remove ${member.name} from this family circle?`)) {
+                    onDelete(member.id);
+                  }
+                }}
+                className="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
+                title="Remove Member"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

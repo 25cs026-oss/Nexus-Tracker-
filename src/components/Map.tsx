@@ -124,7 +124,7 @@ function getMemoizedFamilyIcon(
   return icon;
 }
 
-// Controller for bounds fitting and centering with strict debounce
+// Controller for bounds fitting and centering without overriding user zoom
 function MapViewController({
   members,
   focusLocation,
@@ -136,8 +136,25 @@ function MapViewController({
 }) {
   const map = useMap();
   const lastFocusRef = useRef<string>('');
+  const lastFitTriggerRef = useRef<number>(0);
+  const userInteractedRef = useRef<boolean>(false);
 
-  // Smooth pan/zoom when focusLocation changes (debounced by coordinate equality)
+  // Detect when user manually zooms or drags the map
+  useEffect(() => {
+    const onUserInteract = (e: any) => {
+      if (e?.originalEvent) {
+        userInteractedRef.current = true;
+      }
+    };
+    map.on('movestart', onUserInteract);
+    map.on('zoomstart', onUserInteract);
+    return () => {
+      map.off('movestart', onUserInteract);
+      map.off('zoomstart', onUserInteract);
+    };
+  }, [map]);
+
+  // Focus location changes (preserves user zoom level!)
   useEffect(() => {
     if (!focusLocation || isNaN(focusLocation.lat) || isNaN(focusLocation.lng)) return;
 
@@ -145,28 +162,33 @@ function MapViewController({
     if (coordKey === lastFocusRef.current) return;
     lastFocusRef.current = coordKey;
 
+    // Reset user interaction when an explicit focus target is given
+    userInteractedRef.current = false;
+
     try {
-      map.setView([focusLocation.lat, focusLocation.lng], 15, { animate: false });
-    } catch {
-      // Map may be unmounting
-    }
+      const currentZoom = Math.max(map.getZoom() || 15, 14);
+      map.setView([focusLocation.lat, focusLocation.lng], currentZoom, { animate: false });
+    } catch {}
   }, [focusLocation?.lat, focusLocation?.lng, map]);
 
-  // Fit all markers when requested
+  // Fit all markers ONLY when triggerFitAll is explicitly clicked
   useEffect(() => {
-    if (triggerFitAll === 0 || members.length === 0) return;
+    if (triggerFitAll === 0 || triggerFitAll === lastFitTriggerRef.current) return;
+    lastFitTriggerRef.current = triggerFitAll;
+    userInteractedRef.current = false;
+
+    if (members.length === 0) return;
 
     try {
       if (members.length === 1) {
-        map.setView([members[0].lastLat, members[0].lastLng], 15, { animate: false });
+        const currentZoom = Math.max(map.getZoom() || 15, 14);
+        map.setView([members[0].lastLat, members[0].lastLng], currentZoom, { animate: false });
         return;
       }
       const bounds = L.latLngBounds(members.map(m => [m.lastLat, m.lastLng]));
       map.fitBounds(bounds, { padding: [40, 40], maxZoom: 16, animate: false });
-    } catch {
-      // Ignore fit error
-    }
-  }, [triggerFitAll, members, map]);
+    } catch {}
+  }, [triggerFitAll]); // STRICTLY depend on triggerFitAll, never on members!
 
   return null;
 }
