@@ -5,6 +5,7 @@ export interface GridCircle {
   name: string;
   createdAt: any;
   ownerId?: string;
+  requireApproval?: boolean;
   safeZones?: SafeZone[];
 }
 
@@ -28,6 +29,8 @@ export interface DeviceMember {
   statusUpdatedAt?: any;
   currentPlace?: string; // Name of safe zone if inside
   isSharingPaused?: boolean;
+  status?: 'pending' | 'approved' | 'declined';
+  isApproved?: boolean;
 }
 
 export interface SafeZone {
@@ -61,7 +64,7 @@ export interface CheckInPing {
 }
 
 export interface SystemLog {
-  id: string;
+  id?: string;
   message: string;
   timestamp: Date | string | number;
   type: 'info' | 'warning' | 'error' | 'success';

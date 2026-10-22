@@ -62,7 +62,8 @@ import { InstallAppModal } from './components/InstallAppModal';
 import { 
   Users, 
   MapPin, 
-  ShieldAlert, 
+  ShieldAlert,
+  ShieldCheck, 
   MessageSquare, 
   Settings, 
   Navigation, 
@@ -82,6 +83,7 @@ import {
   Smartphone,
   Sun,
   History,
+  Clock,
   X,
   Map as MapIcon
 } from 'lucide-react';
@@ -142,6 +144,9 @@ export default function App() {
   // Mobile Native App State
   const [mobileSheetExpanded, setMobileSheetExpanded] = useState<boolean>(false);
   const [mobileTab, setMobileTab] = useState<'members' | 'history' | 'checkins'>('members');
+
+  // Pending Join Requests (Host Approval Queue)
+  const [pendingJoinRequests, setPendingJoinRequests] = useState<DeviceMember[]>([]);
 
   // Mobile Bottom Sheet Gesture Tracking
   const touchStartY = useRef<number>(0);
@@ -498,13 +503,20 @@ export default function App() {
       
       const memberDocId = `${currentCircle.id}_${deviceId}`;
 
+      // Separate pending join requests (Host approval queue)
+      const pending = rawList.filter(m => m.status === 'pending' && m.id !== memberDocId);
+      setPendingJoinRequests(pending);
+
+      // Only approved members are shown in live tracking
+      const approvedOnly = rawList.filter(m => m.status !== 'pending' || m.id === memberDocId);
+
       // Deduplicate: If multiple docs in Firestore share the same ID or name, keep only ONE clean item
       const seenIds = new Set<string>();
       const seenNames = new Set<string>();
       const list: DeviceMember[] = [];
 
       // Give priority to the current user's document
-      const selfDoc = rawList.find(m => m.id === memberDocId || (m.name && m.name === memberName));
+      const selfDoc = approvedOnly.find(m => m.id === memberDocId || (m.name && m.name === memberName));
       if (selfDoc) {
         seenIds.add(selfDoc.id);
         if (selfDoc.name) seenNames.add(selfDoc.name);
@@ -537,7 +549,7 @@ export default function App() {
         });
       }
 
-      for (const m of rawList) {
+      for (const m of approvedOnly) {
         if (m.id === memberDocId || (m.name && m.name === memberName)) continue;
         if (seenIds.has(m.id)) continue;
         if (m.name && seenNames.has(m.name)) continue;
@@ -782,16 +794,16 @@ export default function App() {
     }
   }, [currentCircle?.id]);
 
-  // Join Circle Handler (Uses live location, NOT San Francisco!)
+  // Join Circle Handler with Host Permission Enforcement
   const handleJoinCircle = async (
     pin: string, 
     name: string, 
     role: MemberRole, 
     avatar: string
-  ): Promise<boolean> => {
+  ): Promise<any> => {
     if (pin === DEMO_PIN) {
       startDemoCircle();
-      return true;
+      return { success: true };
     }
 
     try {
@@ -803,33 +815,59 @@ export default function App() {
       } else {
         const q = query(collection(db, 'grids'), where('id', '==', pin));
         const snap = await getDocs(q);
-        if (snap.empty) return false;
+        if (snap.empty) return { success: false, error: 'Circle code not found' };
         circleData = snap.docs[0].data() as GridCircle;
       }
 
-      localStorage.setItem(MEMBER_NAME_KEY, name);
-      localStorage.setItem(MEMBER_ROLE_KEY, role);
-      localStorage.setItem(MEMBER_AVATAR_KEY, avatar);
-      localStorage.setItem(CIRCLE_PIN_KEY, pin);
-      localStorage.setItem(CIRCLE_DATA_KEY, JSON.stringify(circleData));
+      const memberDocId = `${pin}_${deviceId}`;
+      const isOwner = circleData.ownerId === deviceId;
 
-      setMemberName(name);
-      setMemberRole(role);
-      setMemberAvatar(avatar);
-      setCurrentCircle(circleData);
-      setIsDemoMode(false);
-      saveCircleToStorage(circleData, role, avatar, name);
+      // Check if user was already approved previously
+      const existingDoc = await getDoc(doc(db, 'devices', memberDocId));
+      const isAlreadyApproved = existingDoc.exists() && (existingDoc.data()?.status === 'approved' || !existingDoc.data()?.status);
 
-      // Determine real live coordinates
       let userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat;
       let userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng;
       if (!userLat || !userLng) {
         const ip = await geoService.getFastIpLocation();
-        userLat = ip?.lat || 19.0760;
-        userLng = ip?.lng || 72.8777;
+        userLat = ip?.lat || 21.2366;
+        userLng = ip?.lng || 72.7791;
       }
 
-      const memberDocId = `${pin}_${deviceId}`;
+      if (isOwner || isAlreadyApproved) {
+        // Owner or already-approved member enters immediately!
+        localStorage.setItem(MEMBER_NAME_KEY, name);
+        localStorage.setItem(MEMBER_ROLE_KEY, role);
+        localStorage.setItem(MEMBER_AVATAR_KEY, avatar);
+        localStorage.setItem(CIRCLE_PIN_KEY, pin);
+        localStorage.setItem(CIRCLE_DATA_KEY, JSON.stringify(circleData));
+
+        setMemberName(name);
+        setMemberRole(role);
+        setMemberAvatar(avatar);
+        setCurrentCircle(circleData);
+        setIsDemoMode(false);
+        saveCircleToStorage(circleData, role, avatar, name);
+
+        await setDoc(doc(db, 'devices', memberDocId), {
+          id: memberDocId,
+          name,
+          role,
+          avatar,
+          lastLat: userLat,
+          lastLng: userLng,
+          lastUpdated: serverTimestamp(),
+          gridId: pin,
+          status: 'approved',
+          battery: currentBattery?.level || 100,
+          isCharging: currentBattery?.isCharging || false
+        }, { merge: true });
+
+        setMapFocusOverride({ lat: userLat, lng: userLng });
+        return { success: true };
+      }
+
+      // NEW MEMBER: Request permission from Circle Host!
       await setDoc(doc(db, 'devices', memberDocId), {
         id: memberDocId,
         name,
@@ -839,15 +877,21 @@ export default function App() {
         lastLng: userLng,
         lastUpdated: serverTimestamp(),
         gridId: pin,
+        status: 'pending',
         battery: currentBattery?.level || 100,
         isCharging: currentBattery?.isCharging || false
       }, { merge: true });
 
-      setMapFocusOverride({ lat: userLat, lng: userLng });
-      return true;
+      return {
+        success: false,
+        pending: true,
+        circleName: circleData.name,
+        pin,
+        memberDocId
+      };
     } catch {
       startDemoCircle();
-      return true;
+      return { success: true };
     }
   };
 
@@ -983,6 +1027,29 @@ export default function App() {
     }
   };
 
+  // Approve a pending member (Grant permission to enter room)
+  const handleApproveMember = async (memberId: string) => {
+    try {
+      await updateDoc(doc(db, 'devices', memberId), {
+        status: 'approved',
+        lastUpdated: serverTimestamp()
+      });
+      setPendingJoinRequests(prev => prev.filter(m => m.id !== memberId));
+    } catch (err) {
+      console.error('Failed to approve member:', err);
+    }
+  };
+
+  // Decline a pending member
+  const handleDeclineMember = async (memberId: string) => {
+    try {
+      await deleteDoc(doc(db, 'devices', memberId));
+      setPendingJoinRequests(prev => prev.filter(m => m.id !== memberId));
+    } catch (err) {
+      console.error('Failed to decline member:', err);
+    }
+  };
+
   // Delete/Remove member from circle
   const handleDeleteMember = async (memberId: string) => {
     setMembers(prev => prev.filter(m => m.id !== memberId));
@@ -1115,6 +1182,58 @@ export default function App() {
 
   return (
     <div className="h-[100dvh] overflow-hidden relative lg:h-auto lg:min-h-screen lg:overflow-visible flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 font-sans select-none">
+
+      
+      {/* 🔔 Host Join Request Approval Banner (Floating at Top) */}
+      {pendingJoinRequests.length > 0 && (currentCircle.ownerId === deviceId || !currentCircle.ownerId) && (
+        <div className="fixed top-14 left-3 right-3 sm:left-auto sm:right-4 sm:w-96 z-50 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-2 border-blue-500 rounded-3xl p-3.5 shadow-2xl space-y-2 animate-bounce-subtle">
+          <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+            <div className="flex items-center gap-1.5 text-xs font-black text-blue-600 dark:text-blue-400">
+              <ShieldCheck className="w-4 h-4 text-blue-600" />
+              <span>Permission Request ({pendingJoinRequests.length})</span>
+            </div>
+            <span className="text-[10px] text-slate-400 font-semibold">Only Host Can Allow</span>
+          </div>
+
+          <div className="space-y-2 max-h-56 overflow-y-auto">
+            {pendingJoinRequests.map(req => (
+              <div key={req.id} className="p-2.5 bg-slate-50 dark:bg-slate-800/80 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-xl p-1 bg-white dark:bg-slate-700 rounded-xl shadow-xs shrink-0">
+                    {req.avatar || '👤'}
+                  </span>
+                  <div className="truncate">
+                    <div className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                      {req.name}
+                    </div>
+                    <div className="text-[10px] text-slate-500">
+                      Wants to join as {req.role || 'Member'}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => handleApproveMember(req.id)}
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1 transition-all"
+                    title="Allow entry"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Allow</span>
+                  </button>
+                  <button
+                    onClick={() => handleDeclineMember(req.id)}
+                    className="p-1.5 bg-slate-200 hover:bg-red-100 text-slate-600 hover:text-red-600 dark:bg-slate-700 dark:hover:bg-red-950 rounded-xl transition-all"
+                    title="Decline request"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 📱 MOBILE NATIVE EXPERIENCE (Find My / Life360 style) */}
       
@@ -1504,6 +1623,45 @@ export default function App() {
               <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2.5">
                 {mobileTab === 'members' && (
                   <>
+
+              {/* Pending Join Requests Box */}
+              {pendingJoinRequests.length > 0 && (currentCircle.ownerId === deviceId || !currentCircle.ownerId) && (
+                <div className="p-3 bg-amber-50 dark:bg-amber-950/40 rounded-2xl border border-amber-200/80 dark:border-amber-800/80 mb-2">
+                  <div className="text-xs font-bold text-amber-900 dark:text-amber-200 flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-amber-600 animate-spin" />
+                      <span>Waiting for Host Permission ({pendingJoinRequests.length})</span>
+                    </div>
+                    <span className="text-[10px] text-amber-600 font-semibold">Pending</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {pendingJoinRequests.map(req => (
+                      <div key={req.id} className="p-2 bg-white dark:bg-slate-900 rounded-xl border border-amber-100 dark:border-amber-900/40 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 truncate">
+                          <span className="text-base">{req.avatar || '👤'}</span>
+                          <span className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate">{req.name}</span>
+                          <span className="text-[10px] text-slate-400 font-semibold">({req.role})</span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => handleApproveMember(req.id)}
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold"
+                          >
+                            Allow
+                          </button>
+                          <button
+                            onClick={() => handleDeclineMember(req.id)}
+                            className="px-2 py-1 bg-slate-100 hover:bg-red-100 text-slate-600 hover:text-red-600 rounded-lg text-[11px] font-bold"
+                          >
+                            Decline
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
                     <div className="p-3 bg-blue-50/70 dark:bg-blue-950/40 rounded-2xl border border-blue-100 dark:border-blue-900/40 text-xs text-blue-900 dark:text-blue-200 flex items-center justify-between">
                       <div>
                         <span className="font-bold">Circle PIN:</span>
@@ -2059,6 +2217,45 @@ export default function App() {
           {/* Members List */}
           {(activeTab === 'members' || activeTab === 'map') && (
             <div className="flex-1 flex flex-col gap-2.5 overflow-y-auto max-h-[580px] pr-1">
+
+              {/* Pending Join Requests Box */}
+              {pendingJoinRequests.length > 0 && (currentCircle.ownerId === deviceId || !currentCircle.ownerId) && (
+                <div className="p-3 bg-amber-50 dark:bg-amber-950/40 rounded-2xl border border-amber-200/80 dark:border-amber-800/80 mb-2">
+                  <div className="text-xs font-bold text-amber-900 dark:text-amber-200 flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-amber-600 animate-spin" />
+                      <span>Waiting for Host Permission ({pendingJoinRequests.length})</span>
+                    </div>
+                    <span className="text-[10px] text-amber-600 font-semibold">Pending</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {pendingJoinRequests.map(req => (
+                      <div key={req.id} className="p-2 bg-white dark:bg-slate-900 rounded-xl border border-amber-100 dark:border-amber-900/40 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 truncate">
+                          <span className="text-base">{req.avatar || '👤'}</span>
+                          <span className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate">{req.name}</span>
+                          <span className="text-[10px] text-slate-400 font-semibold">({req.role})</span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => handleApproveMember(req.id)}
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold"
+                          >
+                            Allow
+                          </button>
+                          <button
+                            onClick={() => handleDeclineMember(req.id)}
+                            className="px-2 py-1 bg-slate-100 hover:bg-red-100 text-slate-600 hover:text-red-600 rounded-lg text-[11px] font-bold"
+                          >
+                            Decline
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {members.length === 0 ? (
                 <div className="text-center py-10 px-4 bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800">
                   <div className="text-3xl mb-2">👨‍👩‍👧‍👦</div>

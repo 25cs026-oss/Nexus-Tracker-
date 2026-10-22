@@ -1,10 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { MemberRole, SavedCircleSummary } from '../types';
+import { db, doc, onSnapshot, deleteDoc } from '../firebase';
 import { geoService, GeoLocationResult } from '../utils/geolocation';
 import { 
   Users, 
   Plus, 
-  KeyRound, 
+  KeyRound,
+  ShieldCheck,
+  CheckCircle2,
+  AlertCircle, 
   Sparkles, 
   MapPin, 
   ArrowRight, 
@@ -16,7 +20,8 @@ import {
 } from 'lucide-react';
 
 interface OnboardingModalProps {
-  onJoinCircle: (pin: string, name: string, role: MemberRole, avatar: string) => Promise<boolean>;
+  onJoinCircle: (pin: string, name: string, role: MemberRole, avatar: string) => Promise<any>;
+  onCompleteApprovedJoin?: (info: { pin: string; name: string; role: MemberRole; avatar: string }) => void;
   onCreateCircle: (circleName: string, pin: string, name: string, role: MemberRole, avatar: string) => Promise<boolean>;
   onStartDemo: () => void;
   defaultName: string;
@@ -53,6 +58,55 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [locationDetected, setLocationDetected] = useState<boolean>(false);
+  const [waitingApproval, setWaitingApproval] = useState<{
+    pin: string;
+    circleName: string;
+    memberDocId: string;
+    name: string;
+    role: MemberRole;
+    avatar: string;
+  } | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [approvedSuccess, setApprovedSuccess] = useState<boolean>(false);
+
+  // Real-time listener for Host Approval
+  useEffect(() => {
+    if (!waitingApproval) return;
+
+    const unsub = onSnapshot(doc(db, 'devices', waitingApproval.memberDocId), (docSnap) => {
+      if (!docSnap.exists()) {
+        setApprovalError('Your join request was declined by the circle host.');
+        return;
+      }
+
+      const data = docSnap.data();
+      if (data.status === 'approved') {
+        setApprovedSuccess(true);
+        setTimeout(() => {
+          if (onSelectSavedCircle) {
+            onSelectSavedCircle(waitingApproval.pin);
+          } else {
+            window.location.reload();
+          }
+        }, 1200);
+      } else if (data.status === 'declined') {
+        setApprovalError('Your join request was declined by the circle host.');
+      }
+    });
+
+    return () => unsub();
+  }, [waitingApproval]);
+
+  const handleCancelWaiting = async () => {
+    if (waitingApproval) {
+      try {
+        await deleteDoc(doc(db, 'devices', waitingApproval.memberDocId));
+      } catch {}
+      setWaitingApproval(null);
+      setApprovalError(null);
+      setApprovedSuccess(false);
+    }
+  };
 
   // Sync if defaultName changes
   useEffect(() => {
@@ -234,7 +288,71 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           </div>
         )}
 
-        {/* Tab Switcher */}
+        {/* Waiting for Host Permission Screen */}
+        {waitingApproval ? (
+          <div className="py-4 text-center flex flex-col items-center">
+            {/* Pulsing Shield Radar */}
+            <div className="relative mb-4">
+              <div className={`w-16 h-16 rounded-full flex items-center justify-center text-2xl shadow-xl transition-all ${
+                approvedSuccess
+                  ? 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-600 scale-110'
+                  : 'bg-blue-100 dark:bg-blue-950/80 text-blue-600 shadow-blue-500/20'
+              }`}>
+                {approvedSuccess ? (
+                  <CheckCircle2 className="w-9 h-9 text-emerald-600 animate-bounce" />
+                ) : (
+                  <ShieldCheck className="w-8 h-8 animate-pulse text-blue-600" />
+                )}
+              </div>
+              {!approvedSuccess && (
+                <div className="absolute -inset-2 rounded-full border-2 border-blue-400/40 animate-ping pointer-events-none" />
+              )}
+            </div>
+
+            <h3 className="text-xl font-black text-slate-900 dark:text-white">
+              {approvedSuccess ? 'Permission Granted!' : 'Host Permission Required'}
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-xs mx-auto">
+              {approvedSuccess
+                ? `Welcome to ${waitingApproval.circleName}! Entering room...`
+                : <>A join request has been sent to the host of <span className="font-bold text-slate-800 dark:text-slate-200">{waitingApproval.circleName}</span>. No one can join without host permission.</>
+              }
+            </p>
+
+            {/* Profile summary pill */}
+            <div className="mt-3.5 px-3.5 py-1.5 bg-slate-100 dark:bg-slate-800 rounded-2xl flex items-center gap-2 text-xs border border-slate-200/80 dark:border-slate-700/80">
+              <span className="text-xl">{waitingApproval.avatar || '👤'}</span>
+              <span className="font-bold text-slate-800 dark:text-slate-100">{waitingApproval.name}</span>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 font-bold">
+                {waitingApproval.role}
+              </span>
+            </div>
+
+            {!approvedSuccess && (
+              <div className="mt-4 flex items-center gap-2 text-xs text-amber-700 dark:text-amber-300 font-bold bg-amber-50 dark:bg-amber-950/60 px-4 py-2.5 rounded-2xl border border-amber-200/80 dark:border-amber-800/80 shadow-xs">
+                <Clock className="w-4 h-4 animate-spin text-amber-500 shrink-0" />
+                <span>Waiting for circle host to accept your request...</span>
+              </div>
+            )}
+
+            {approvalError && (
+              <div className="mt-3 text-xs text-red-600 dark:text-red-400 font-semibold bg-red-50 dark:bg-red-950/40 px-3.5 py-2 rounded-xl flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{approvalError}</span>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={handleCancelWaiting}
+              className="mt-6 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 underline"
+            >
+              Cancel Join Request
+            </button>
+          </div>
+        ) : (
+          <>
+          {/* Tab Switcher */}
         <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl mb-5">
           <button
             type="button"
@@ -549,6 +667,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               <Plus className="w-4 h-4" />
             </button>
           </form>
+        )}
+
+        </>
         )}
 
         {/* Instant Demo Preview Option */}
