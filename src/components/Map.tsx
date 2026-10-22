@@ -410,9 +410,19 @@ export const Map: React.FC<MapProps> = ({
                         )}
                         <span>{member.battery ?? '--'}%</span>
                       </div>
-                      <span className="text-[11px] text-slate-400">
-                        {formatRelativeTime(member.lastUpdated)}
-                      </span>
+                      {(() => {
+                        const timeStr = formatRelativeTime(member.lastUpdated);
+                        return timeStr === 'Live' ? (
+                          <span className="text-[11px] inline-flex items-center gap-1 font-bold text-emerald-600 dark:text-emerald-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                            Live
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-slate-400">
+                            {timeStr}
+                          </span>
+                        );
+                      })()}
                     </div>
                   </div>
 

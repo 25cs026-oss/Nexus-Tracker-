@@ -220,13 +220,82 @@ export default function App() {
   const lastFirestoreSyncRef = useRef<number>(0);
   const lastSavedCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
   const isAppHiddenRef = useRef<boolean>(false);
+  const heartbeatIntervalRef = useRef<number | null>(null);
 
-  // Auto-switch to Eco-Mode when user locks screen, minimizes, or switches apps
+  // Dedicated Heartbeat sync: ensures Mom, Dad & all members' lastUpdated in Firestore
+  // is continuously updated every 15-25 seconds even when device is stationary (desk, pocket).
+  const sendHeartbeat = useCallback(async (forced = false) => {
+    if (!currentCircle || isDemoMode || isSharingPaused) return;
+
+    const coords = currentCoords || geoService.lastKnownPosition;
+    if (!coords) return;
+
+    const now = Date.now();
+    const isHidden = isAppHiddenRef.current;
+    const minInterval = isHidden ? 25000 : 12000;
+    const elapsed = now - lastFirestoreSyncRef.current;
+
+    if (!forced && lastFirestoreSyncRef.current > 0 && elapsed < minInterval) {
+      return;
+    }
+
+    lastFirestoreSyncRef.current = now;
+    lastSavedCoordsRef.current = { lat: coords.lat, lng: coords.lng };
+
+    const memberDocId = `${currentCircle.id}_${deviceId}`;
+    const currentPlace = findCurrentPlace(coords.lat, coords.lng, safeZones);
+    const liveBattery = await getLiveBattery();
+
+    const payload: Record<string, any> = {
+      id: memberDocId,
+      name: memberName || 'Family Member',
+      role: memberRole,
+      avatar: memberAvatar,
+      lastLat: coords.lat,
+      lastLng: coords.lng,
+      lastUpdated: serverTimestamp(),
+      gridId: currentCircle.id,
+      speed: coords.speed || currentSpeed || 0,
+      accuracy: coords.accuracy || gpsAccuracy || 10,
+      isSharingPaused: false,
+      battery: liveBattery.level,
+      isCharging: liveBattery.isCharging
+    };
+
+    if (currentPlace?.name) {
+      payload.currentPlace = currentPlace.name;
+    }
+
+    try {
+      await setDoc(doc(db, 'devices', memberDocId), payload, { merge: true });
+    } catch (err) {
+      console.warn('Heartbeat firestore sync failed:', err);
+    }
+  }, [currentCircle, isDemoMode, isSharingPaused, currentCoords, deviceId, safeZones, memberName, memberRole, memberAvatar, currentSpeed, gpsAccuracy]);
+
+  // Auto-switch to Eco-Mode when user locks screen, minimizes, or switches apps + wake up on resume
   useEffect(() => {
     const handleVisibility = () => {
       const isHidden = document.visibilityState === 'hidden';
       isAppHiddenRef.current = isHidden;
       geoService.setEcoMode(isHidden);
+      if (!isHidden) {
+        geoService.forceRefresh();
+        sendHeartbeat(true);
+      }
+    };
+
+    const handleFocus = () => {
+      isAppHiddenRef.current = false;
+      geoService.setEcoMode(false);
+      lastFirestoreSyncRef.current = 0;
+      geoService.forceRefresh();
+      sendHeartbeat(true);
+    };
+
+    const handleOnline = () => {
+      geoService.forceRefresh();
+      sendHeartbeat(true);
     };
 
     document.addEventListener('visibilitychange', handleVisibility);
@@ -234,24 +303,61 @@ export default function App() {
       isAppHiddenRef.current = true;
       geoService.setEcoMode(true);
     });
-    window.addEventListener('focus', () => {
-      isAppHiddenRef.current = false;
-      geoService.setEcoMode(false);
-      lastFirestoreSyncRef.current = 0; // Immediate sync when opening app
-    });
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('online', handleOnline);
+
+    const handleSwMessage = (e: MessageEvent) => {
+      if (e.data?.type === 'SYNC_LOCATION' || e.data?.type === 'PERIODIC_SYNC_LOCATION') {
+        geoService.forceRefresh();
+        sendHeartbeat(true);
+      }
+    };
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    }
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('online', handleOnline);
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+      }
     };
-  }, []);
+  }, [sendHeartbeat]);
 
-  // Sync background runner state
+  // Zero-click Auto-Start Background Runner & Sync state
   useEffect(() => {
+    backgroundRunner.autoStart();
+
     backgroundRunner.onStateChange((active) => {
       setIsBackgroundActive(active);
       setIsWakeLockActive(active);
     });
-  }, []);
+
+    backgroundRunner.onHeartbeat(() => {
+      sendHeartbeat();
+    });
+
+    // Zero-click fallback: on first user touch anywhere, start background runner & push heartbeat
+    const onUserTouch = () => {
+      backgroundRunner.start().catch(() => {});
+      sendHeartbeat(true);
+    };
+
+    window.addEventListener('pointerdown', onUserTouch, { once: true, passive: true });
+    window.addEventListener('touchstart', onUserTouch, { once: true, passive: true });
+    window.addEventListener('click', onUserTouch, { once: true, passive: true });
+  }, [sendHeartbeat]);
+
+  // Ensure background runner starts as soon as circle is active
+  useEffect(() => {
+    if (currentCircle) {
+      backgroundRunner.autoStart();
+      sendHeartbeat(true);
+    }
+  }, [currentCircle, sendHeartbeat]);
 
   const toggleBackgroundTracking = async () => {
     if (isBackgroundActive) {
@@ -263,6 +369,7 @@ export default function App() {
       if (ok) {
         setIsBackgroundActive(true);
         setIsWakeLockActive(true);
+        sendHeartbeat(true);
       } else {
         setShowBackgroundModal(true);
       }
@@ -486,10 +593,10 @@ export default function App() {
       return prev;
     });
 
-    // Battery Guard: Throttle Firestore transmissions to 10s in foreground, 30s in background
+    // Battery Guard: Throttle Firestore transmissions to 10s in foreground, 25s in background
     const now = Date.now();
     const isHidden = isAppHiddenRef.current;
-    const minSyncInterval = isHidden ? 30000 : 9800; // 10s foreground, 30s background
+    const minSyncInterval = isHidden ? 25000 : 9800; // 10s foreground, 25s background
     const elapsedSinceLastSync = now - lastFirestoreSyncRef.current;
 
     let distanceMoved = 999;
@@ -499,7 +606,7 @@ export default function App() {
       distanceMoved = Math.sqrt(dLat * dLat + dLng * dLng);
     }
 
-    if (lastFirestoreSyncRef.current > 0 && elapsedSinceLastSync < minSyncInterval && distanceMoved < 12 && (!res.speed || res.speed < 1)) {
+    if (lastFirestoreSyncRef.current > 0 && elapsedSinceLastSync < minSyncInterval && distanceMoved < 10 && (!res.speed || res.speed < 1)) {
       return;
     }
 
@@ -523,6 +630,12 @@ export default function App() {
     setIsTracking(true);
     geoService.startTracking(handlePositionUpdate, handleStatusUpdate);
 
+    // Guaranteed 15s Heartbeat transmitter (eliminates stationary "9h ago" bug)
+    if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+    heartbeatIntervalRef.current = window.setInterval(() => {
+      sendHeartbeat();
+    }, 15000);
+
     if (historyIntervalId.current) clearInterval(historyIntervalId.current);
     historyIntervalId.current = window.setInterval(async () => {
       if (currentCoords && currentCircle && !isDemoMode && !isSharingPaused) {
@@ -542,10 +655,14 @@ export default function App() {
         } catch {}
       }
     }, 30000);
-  }, [handlePositionUpdate, handleStatusUpdate, currentCoords, currentCircle, isDemoMode, isSharingPaused, safeZones, deviceId, currentSpeed]);
+  }, [handlePositionUpdate, handleStatusUpdate, currentCoords, currentCircle, isDemoMode, isSharingPaused, safeZones, deviceId, currentSpeed, sendHeartbeat]);
 
   const stopTracking = useCallback(() => {
     geoService.stopTracking();
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
     if (historyIntervalId.current) {
       clearInterval(historyIntervalId.current);
       historyIntervalId.current = null;

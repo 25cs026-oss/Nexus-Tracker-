@@ -156,9 +156,19 @@ export const FamilyMemberCard: React.FC<FamilyMemberCardProps> = ({
             )}
             <span>{member.battery ?? '--'}%</span>
           </div>
-          <span className="text-[10px] text-slate-400 mt-1">
-            {formatRelativeTime(member.lastUpdated)}
-          </span>
+          {(() => {
+            const timeStr = formatRelativeTime(member.lastUpdated);
+            return timeStr === 'Live' ? (
+              <span className="text-[10px] inline-flex items-center gap-1 font-bold text-emerald-600 dark:text-emerald-400 mt-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                Live
+              </span>
+            ) : (
+              <span className="text-[10px] text-slate-400 mt-1">
+                {timeStr}
+              </span>
+            );
+          })()}
 
           <div className="flex items-center gap-1 mt-2.5">
             {onNavigate && (

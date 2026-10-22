@@ -4,7 +4,8 @@
  * 2. Rapid IP-based City Geolocation pre-seed (< 1 second) so the map immediately centers on user's real location
  * 3. 10-second smart interval throttling to protect phone battery
  * 4. Eco Background Mode (low-power cell/Wi-Fi assisted) when app is minimized or phone is locked
- * 5. Continuously watches position with minimal CPU drain
+ * 5. Stationary Polling Fallback to guarantee heartbeat updates even when the device does not physically move
+ * 6. Local cache restoration for zero-second startup
  */
 
 export interface GeoLocationResult {
@@ -20,6 +21,7 @@ export type GpsStatus = 'idle' | 'searching' | 'active' | 'approximate' | 'denie
 
 export class GeolocationService {
   private watchId: number | null = null;
+  private pollIntervalId: number | null = null;
   private onPositionCallback: ((pos: GeoLocationResult) => void) | null = null;
   private onStatusCallback: ((status: GpsStatus, errorMsg?: string) => void) | null = null;
   private isRunning: boolean = false;
@@ -27,6 +29,20 @@ export class GeolocationService {
   private isEcoMode: boolean = false;
   private lastEmitTime: number = 0;
   public lastKnownPosition: GeoLocationResult | null = null;
+
+  constructor() {
+    if (typeof window !== 'undefined') {
+      try {
+        const cached = localStorage.getItem('nexus_cached_loc');
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed && typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
+            this.lastKnownPosition = parsed;
+          }
+        }
+      } catch {}
+    }
+  }
 
   public isSecureContext(): boolean {
     if (typeof window === 'undefined') return true;
@@ -65,8 +81,9 @@ export class GeolocationService {
     if (this.isEcoMode === eco) return;
     this.isEcoMode = eco;
     if (this.isRunning) {
-      // Restart watch with low-power or high-accuracy configuration
+      // Restart watch and polling with adjusted frequency
       this.startWatch();
+      this.startPolling();
     }
   }
 
@@ -91,9 +108,9 @@ export class GeolocationService {
 
     onStatus('searching', 'Acquiring your live location...');
 
-    // Parallel Strategy: Fast IP lookup
+    // Fast IP lookup fallback
     this.getFastIpLocation().then(ipPos => {
-      if (ipPos && this.isRunning && !this.hasAccurateLock) {
+      if (ipPos && this.isRunning && !this.hasAccurateLock && !this.lastKnownPosition) {
         this.lastKnownPosition = ipPos;
         this.onPositionCallback?.(ipPos);
         this.onStatusCallback?.('approximate', 'Using approximate city location while GPS locks...');
@@ -106,6 +123,18 @@ export class GeolocationService {
     }
 
     // High accuracy first fix
+    this.requestSingleFix();
+
+    // Continuous watch with battery-efficient 10s throttling
+    this.startWatch();
+
+    // Continuous stationary fallback polling
+    this.startPolling();
+  }
+
+  private requestSingleFix() {
+    if (!('geolocation' in navigator)) return;
+
     navigator.geolocation.getCurrentPosition(
       (position) => {
         if (!this.isRunning) return;
@@ -113,38 +142,33 @@ export class GeolocationService {
         this.handleSuccess(position, false);
       },
       (err) => {
-        console.warn('High-accuracy GPS request error:', err.message);
+        console.warn('GPS single-fix warning:', err.message);
         if (err.code === 1) { // PERMISSION_DENIED
-          onStatus('denied', 'Location permission denied. Please allow in browser address bar.');
+          this.onStatusCallback?.('denied', 'Location permission denied. Please allow in browser address bar.');
           return;
         }
 
-        // Retry with low accuracy (Wi-Fi / Network)
+        // Retry with network/Wi-Fi low accuracy
         navigator.geolocation.getCurrentPosition(
           (fallbackPos) => {
             if (!this.isRunning) return;
             this.hasAccurateLock = true;
             this.handleSuccess(fallbackPos, false);
           },
-          (fallbackErr) => {
-            console.warn('Low-accuracy fallback error:', fallbackErr.message);
-          },
+          () => {},
           {
             enableHighAccuracy: false,
-            timeout: 20000,
+            timeout: 15000,
             maximumAge: 60000
           }
         );
       },
       {
         enableHighAccuracy: !this.isEcoMode,
-        timeout: 20000,
+        timeout: 15000,
         maximumAge: 5000
       }
     );
-
-    // Continuous watch with battery-efficient 10s throttling
-    this.startWatch();
   }
 
   private startWatch() {
@@ -164,24 +188,76 @@ export class GeolocationService {
         if (!this.isRunning) return;
         if (err.code === 1) {
           this.onStatusCallback?.('denied', 'Location permission denied in browser.');
-        } else {
-          console.warn('watchPosition frame skipped:', err.message);
         }
       },
       {
         enableHighAccuracy: !this.isEcoMode,
-        maximumAge: this.isEcoMode ? 25000 : 8000,
+        maximumAge: this.isEcoMode ? 30000 : 8000,
         timeout: 30000
       }
     );
   }
 
+  /**
+   * Periodic polling interval:
+   * Critical for stationary devices (phone on desk or in pocket)
+   * where watchPosition does NOT fire because there is no coordinate delta.
+   * This guarantees continuous heartbeats to Firestore so members never show "9h ago".
+   */
+  private startPolling() {
+    if (this.pollIntervalId !== null) {
+      clearInterval(this.pollIntervalId);
+      this.pollIntervalId = null;
+    }
+
+    const intervalMs = this.isEcoMode ? 30000 : 15000;
+    this.pollIntervalId = window.setInterval(() => {
+      if (!this.isRunning) return;
+
+      if ('geolocation' in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            if (!this.isRunning) return;
+            this.handleSuccess(pos, false);
+          },
+          () => {
+            // If GPS is temporarily unavailable indoors, emit cached position as heartbeat
+            if (this.lastKnownPosition && this.isRunning) {
+              const now = Date.now();
+              const minInterval = this.isEcoMode ? 25000 : 10000;
+              if (now - this.lastEmitTime >= minInterval) {
+                this.lastEmitTime = now;
+                this.onPositionCallback?.(this.lastKnownPosition);
+              }
+            }
+          },
+          {
+            enableHighAccuracy: !this.isEcoMode,
+            timeout: 10000,
+            maximumAge: this.isEcoMode ? 30000 : 10000
+          }
+        );
+      }
+    }, intervalMs);
+  }
+
+  /**
+   * Immediately requests a fresh fix and triggers callback
+   * Useful when waking up from lock screen or app switch
+   */
+  public forceRefresh() {
+    if (!this.isRunning) return;
+    this.requestSingleFix();
+    if (this.lastKnownPosition) {
+      this.onPositionCallback?.(this.lastKnownPosition);
+    }
+  }
+
   private handleSuccess(position: GeolocationPosition, isApproximate: boolean) {
     const now = Date.now();
-    // In foreground: throttle to ~10s. In background eco mode: throttle to ~25-30s.
+    // In foreground: throttle to ~10s. In background eco mode: throttle to ~25s.
     const minInterval = this.isEcoMode ? 25000 : 9500;
     
-    // Always store latest known position
     const { latitude, longitude, accuracy, speed, heading } = position.coords;
     const result: GeoLocationResult = {
       lat: latitude,
@@ -191,10 +267,14 @@ export class GeolocationService {
       heading: heading,
       isApproximate
     };
+
     this.lastKnownPosition = result;
+    try {
+      localStorage.setItem('nexus_cached_loc', JSON.stringify(result));
+    } catch {}
 
     if (this.lastEmitTime > 0 && now - this.lastEmitTime < minInterval) {
-      // Skip emission to preserve phone battery and prevent excessive CPU / state recalculation
+      // Throttle to avoid flooding
       return;
     }
 
@@ -208,6 +288,10 @@ export class GeolocationService {
     if (this.watchId !== null) {
       navigator.geolocation.clearWatch(this.watchId);
       this.watchId = null;
+    }
+    if (this.pollIntervalId !== null) {
+      clearInterval(this.pollIntervalId);
+      this.pollIntervalId = null;
     }
     this.onStatusCallback?.('idle');
   }
