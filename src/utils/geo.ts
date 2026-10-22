@@ -34,6 +34,28 @@ export function formatDistance(meters: number): string {
 }
 
 /**
+ * Estimates travel time based on distance
+ */
+export function estimateTravelTime(meters: number): { walking: string; driving: string } {
+  // Average walking speed: 4.5 km/h = ~75 m/min
+  const walkMinutes = Math.max(1, Math.round(meters / 75));
+  // Average driving speed: 30 km/h in city = ~500 m/min
+  const driveMinutes = Math.max(1, Math.round(meters / 500));
+
+  const formatMin = (m: number) => {
+    if (m < 60) return `${m} min`;
+    const h = Math.floor(m / 60);
+    const rem = m % 60;
+    return rem > 0 ? `${h}h ${rem}m` : `${h}h`;
+  };
+
+  return {
+    walking: formatMin(walkMinutes),
+    driving: formatMin(driveMinutes)
+  };
+}
+
+/**
  * Checks if a point is inside a safe zone radius
  */
 export function isInsideZone(
@@ -128,10 +150,32 @@ export function formatSpeed(speedMps?: number | null): string {
 }
 
 /**
- * Generates navigation URL to open in Google Maps or Apple Maps
+ * Navigation URLs (Google, Apple, OpenStreetMap)
  */
-export function getDirectionsUrl(lat: number, lng: number): string {
+export function getGoogleMapsUrl(lat: number, lng: number): string {
   return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+}
+
+export function getAppleMapsUrl(lat: number, lng: number): string {
+  return `https://maps.apple.com/?daddr=${lat},${lng}`;
+}
+
+export function getOsmUrl(lat: number, lng: number): string {
+  return `https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=%3B${lat}%2C${lng}`;
+}
+
+export function getDirectionsUrl(lat: number, lng: number): string {
+  return getGoogleMapsUrl(lat, lng);
+}
+
+/**
+ * Safely open navigation link in a new tab without blocking React main thread
+ */
+export function openExternalMap(url: string) {
+  // Use timeout to let current browser task finish before tab switch
+  setTimeout(() => {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }, 10);
 }
 
 /**

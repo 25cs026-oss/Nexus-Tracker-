@@ -19,8 +19,8 @@ import {
   collection, 
   doc, 
   setDoc, 
-  getDoc,
-  updateDoc,
+  getDoc, 
+  updateDoc, 
   addDoc, 
   onSnapshot, 
   query, 
@@ -28,17 +28,19 @@ import {
   orderBy, 
   limit, 
   getDocs, 
-  Timestamp, 
   serverTimestamp, 
-  deleteDoc, 
   writeBatch 
 } from './firebase';
 import { 
   findCurrentPlace, 
   getLiveBattery, 
-  formatRelativeTime, 
-  getDirectionsUrl 
+  formatRelativeTime 
 } from './utils/geo';
+import { 
+  geoService, 
+  GeoLocationResult, 
+  GpsStatus 
+} from './utils/geolocation';
 import { 
   DEMO_PIN, 
   DEMO_CIRCLE, 
@@ -55,6 +57,7 @@ import { CheckInModal } from './components/CheckInModal';
 import { SettingsModal } from './components/SettingsModal';
 import { TripTimeline } from './components/TripTimeline';
 import { OnboardingModal } from './components/OnboardingModal';
+import { NavigationModal } from './components/NavigationModal';
 
 import { 
   Users, 
@@ -68,14 +71,10 @@ import {
   Radio, 
   CloudSun, 
   Share2, 
-  History as HistoryIcon,
-  Plus,
-  RefreshCw,
-  Sun,
-  Moon,
+  Plus, 
   Sparkles,
-  Wifi,
-  WifiOff
+  AlertCircle,
+  LocateFixed
 } from 'lucide-react';
 
 const DEVICE_ID_KEY = 'nexus_device_id';
@@ -121,24 +120,25 @@ export default function App() {
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [weather, setWeather] = useState<{ temp: number; condition: string } | null>(null);
 
-  // --- Tracking & Sensor State ---
+  // --- Geolocation State ---
   const [isTracking, setIsTracking] = useState<boolean>(false);
-  const [isSharingPaused, setIsSharingPaused] = useState<boolean>(false);
+  const [gpsStatus, setGpsStatus] = useState<GpsStatus>('idle');
+  const [gpsMessage, setGpsMessage] = useState<string>('');
   const [currentCoords, setCurrentCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [currentSpeed, setCurrentSpeed] = useState<number>(0);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number>(0);
   const [currentBattery, setCurrentBattery] = useState<{ level: number; isCharging: boolean } | null>(null);
-  const [wakeLock, setWakeLock] = useState<any>(null);
+  const [isSharingPaused, setIsSharingPaused] = useState<boolean>(false);
 
   // --- Modals State ---
   const [showSafeZonesModal, setShowSafeZonesModal] = useState(false);
   const [showSosModal, setShowSosModal] = useState(false);
   const [showCheckInModal, setShowCheckInModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [navigatingMember, setNavigatingMember] = useState<DeviceMember | null>(null);
 
   // --- Refs ---
-  const watchId = useRef<number | null>(null);
   const historyIntervalId = useRef<number | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const demoIntervalRef = useRef<number | null>(null);
 
   // Apply Theme to <html> class
@@ -152,7 +152,7 @@ export default function App() {
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
 
-  // Check battery periodically
+  // Battery detection
   useEffect(() => {
     const updateBattery = async () => {
       const bat = await getLiveBattery();
@@ -163,16 +163,16 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch weather for selected member
+  // Fetch weather for selected member (debounced)
   useEffect(() => {
     if (!selectedMember) {
       setWeather(null);
       return;
     }
-    const fetchWeather = async () => {
+    const timeout = setTimeout(async () => {
       try {
         const res = await fetch(
-          `https://api.open-meteo.com/v1/forecast?latitude=${selectedMember.lastLat}&longitude=${selectedMember.lastLng}&current_weather=true`
+          `https://api.open-meteo.com/v1/forecast?latitude=${selectedMember.lastLat.toFixed(2)}&longitude=${selectedMember.lastLng.toFixed(2)}&current_weather=true`
         );
         const data = await res.json();
         if (data.current_weather) {
@@ -190,34 +190,32 @@ export default function App() {
           });
         }
       } catch {
-        // Ignore weather network error
+        // Ignore weather fetch error
       }
-    };
-    fetchWeather();
+    }, 400);
+
+    return () => clearTimeout(timeout);
   }, [selectedMember?.id, selectedMember?.lastLat, selectedMember?.lastLng]);
 
   // --- Real-time Listeners (Firestore) ---
   useEffect(() => {
     if (!currentCircle || isDemoMode) return;
 
-    // 1. Listen to Circle doc (for safeZones updates)
+    // 1. Circle doc listener (for safe zones)
     const circleDocRef = doc(db, 'grids', currentCircle.id);
     const unsubCircle = onSnapshot(circleDocRef, (snap) => {
       if (snap.exists()) {
         const data = snap.data() as GridCircle;
-        if (data.safeZones) {
-          setSafeZones(data.safeZones);
-        }
+        if (data.safeZones) setSafeZones(data.safeZones);
       }
     }, () => {});
 
-    // 2. Listen to Devices in this Circle
+    // 2. Devices in circle listener
     const devicesQuery = query(collection(db, 'devices'), where('gridId', '==', currentCircle.id));
     const unsubDevices = onSnapshot(devicesQuery, (snap) => {
       const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as DeviceMember));
       setMembers(list);
 
-      // Auto-select first member if none selected
       setSelectedMember(prev => {
         if (!prev && list.length > 0) return list[0];
         if (prev) {
@@ -227,10 +225,10 @@ export default function App() {
         return null;
       });
     }, (err) => {
-      console.warn('Devices subscription error, switching to offline fallback if needed:', err);
+      console.warn('Devices subscription error, using demo fallback:', err);
     });
 
-    // 3. Listen to Check-ins
+    // 3. Check-ins listener
     const checkInsQuery = query(
       collection(db, `grids/${currentCircle.id}/checkins`),
       orderBy('timestamp', 'desc'),
@@ -248,7 +246,7 @@ export default function App() {
     };
   }, [currentCircle?.id, isDemoMode]);
 
-  // Listen to Selected Member History
+  // History listener
   useEffect(() => {
     if (!selectedMember || !currentCircle) return;
 
@@ -260,7 +258,7 @@ export default function App() {
     const historyQuery = query(
       collection(db, `devices/${selectedMember.id}/history`),
       orderBy('timestamp', 'desc'),
-      limit(50)
+      limit(40)
     );
     const unsubHistory = onSnapshot(historyQuery, (snap) => {
       const list = snap.docs.map(d => d.data() as HistoryPoint);
@@ -270,100 +268,61 @@ export default function App() {
     return () => unsubHistory();
   }, [selectedMember?.id, currentCircle?.id, isDemoMode]);
 
-  // --- Tracking Logic ---
-  const requestWakeLock = useCallback(async () => {
-    try {
-      if ('wakeLock' in navigator && !wakeLock) {
-        const lock = await (navigator as any).wakeLock.request('screen');
-        setWakeLock(lock);
-        lock.addEventListener('release', () => setWakeLock(null));
-      }
-    } catch {
-      // Wake lock unsupported or rejected
+  // --- Geolocation Tracking ---
+  const handlePositionUpdate = useCallback(async (res: GeoLocationResult) => {
+    setCurrentCoords({ lat: res.lat, lng: res.lng });
+    setCurrentSpeed(res.speed || 0);
+    setGpsAccuracy(res.accuracy);
+
+    if (isDemoMode || !currentCircle) return;
+
+    const currentPlace = findCurrentPlace(res.lat, res.lng, safeZones);
+    const memberDocId = `${currentCircle.id}_${deviceId}`;
+
+    const payload: Partial<DeviceMember> = {
+      id: memberDocId,
+      name: memberName || 'Family Member',
+      role: memberRole,
+      avatar: memberAvatar,
+      lastLat: res.lat,
+      lastLng: res.lng,
+      lastUpdated: serverTimestamp(),
+      gridId: currentCircle.id,
+      speed: res.speed || 0,
+      accuracy: res.accuracy,
+      currentPlace: currentPlace ? currentPlace.name : undefined,
+      isSharingPaused: isSharingPaused
+    };
+
+    if (currentBattery) {
+      payload.battery = currentBattery.level;
+      payload.isCharging = currentBattery.isCharging;
     }
-  }, [wakeLock]);
+
+    try {
+      await setDoc(doc(db, 'devices', memberDocId), payload, { merge: true });
+    } catch (err) {
+      console.warn('Location sync to firestore skipped:', err);
+    }
+  }, [currentCircle, deviceId, memberName, memberRole, memberAvatar, safeZones, isDemoMode, isSharingPaused, currentBattery]);
+
+  const handleStatusUpdate = useCallback((status: GpsStatus, errorMsg?: string) => {
+    setGpsStatus(status);
+    setGpsMessage(errorMsg || '');
+  }, []);
 
   const startTracking = useCallback(() => {
-    if (!currentCircle) return;
     setIsTracking(true);
-    requestWakeLock();
+    geoService.startTracking(handlePositionUpdate, handleStatusUpdate);
 
-    // Silent audio for mobile background persistence
-    try {
-      if (!audioRef.current) {
-        const audio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=');
-        audio.loop = true;
-        audio.volume = 0.05;
-        audioRef.current = audio;
-      }
-      audioRef.current.play().catch(() => {});
-    } catch {
-      // Audio playback blocked
-    }
-
-    if (!('geolocation' in navigator)) {
-      alert('Geolocation is not supported by your browser.');
-      setIsTracking(false);
-      return;
-    }
-
-    const memberDocId = `${currentCircle.id}_${deviceId}`;
-    const deviceRef = doc(db, 'devices', memberDocId);
-    const historyRef = collection(db, `devices/${memberDocId}/history`);
-
-    watchId.current = navigator.geolocation.watchPosition(
-      async (pos) => {
-        const { latitude, longitude, speed, accuracy } = pos.coords;
-        setCurrentCoords({ lat: latitude, lng: longitude });
-        setCurrentSpeed(speed || 0);
-
-        if (isDemoMode) return;
-
-        // Determine current safe zone
-        const currentPlace = findCurrentPlace(latitude, longitude, safeZones);
-
-        const memberPayload: Partial<DeviceMember> = {
-          id: memberDocId,
-          name: memberName || 'Family Member',
-          role: memberRole,
-          avatar: memberAvatar,
-          lastLat: latitude,
-          lastLng: longitude,
-          lastUpdated: serverTimestamp(),
-          gridId: currentCircle.id,
-          speed: speed || 0,
-          accuracy: accuracy || 10,
-          currentPlace: currentPlace ? currentPlace.name : undefined,
-          isSharingPaused: isSharingPaused
-        };
-
-        if (currentBattery) {
-          memberPayload.battery = currentBattery.level;
-          memberPayload.isCharging = currentBattery.isCharging;
-        }
-
-        try {
-          await setDoc(deviceRef, memberPayload, { merge: true });
-        } catch (err) {
-          console.error('Error updating live location:', err);
-        }
-      },
-      (err) => {
-        console.warn('Geolocation watch error:', err.message);
-      },
-      {
-        enableHighAccuracy: true,
-        maximumAge: 5000,
-        timeout: 20000
-      }
-    );
-
-    // Save location point to history every 30 seconds
+    // Periodic history log (every 30s)
+    if (historyIntervalId.current) clearInterval(historyIntervalId.current);
     historyIntervalId.current = window.setInterval(async () => {
-      if (currentCoords && !isDemoMode && !isSharingPaused) {
+      if (currentCoords && currentCircle && !isDemoMode && !isSharingPaused) {
         try {
           const currentPlace = findCurrentPlace(currentCoords.lat, currentCoords.lng, safeZones);
-          await addDoc(historyRef, {
+          const memberDocId = `${currentCircle.id}_${deviceId}`;
+          await addDoc(collection(db, `devices/${memberDocId}/history`), {
             lat: currentCoords.lat,
             lng: currentCoords.lng,
             timestamp: serverTimestamp(),
@@ -375,34 +334,50 @@ export default function App() {
         }
       }
     }, 30000);
-  }, [currentCircle, deviceId, memberName, memberRole, memberAvatar, safeZones, isDemoMode, isSharingPaused, currentCoords, currentSpeed, currentBattery, requestWakeLock]);
+  }, [handlePositionUpdate, handleStatusUpdate, currentCoords, currentCircle, isDemoMode, isSharingPaused, safeZones, deviceId, currentSpeed]);
 
   const stopTracking = useCallback(() => {
-    if (watchId.current !== null) {
-      navigator.geolocation.clearWatch(watchId.current);
-      watchId.current = null;
-    }
-    if (historyIntervalId.current !== null) {
+    geoService.stopTracking();
+    if (historyIntervalId.current) {
       clearInterval(historyIntervalId.current);
       historyIntervalId.current = null;
     }
-    if (audioRef.current) {
-      audioRef.current.pause();
-    }
-    if (wakeLock) {
-      try { wakeLock.release(); } catch {}
-      setWakeLock(null);
-    }
     setIsTracking(false);
-  }, [wakeLock]);
+    setGpsStatus('idle');
+  }, []);
 
-  // Toggle Tracking Button
   const handleToggleTracking = () => {
     if (isTracking) {
       stopTracking();
     } else {
       startTracking();
     }
+  };
+
+  // --- Instant Simulated Walking Test (Works anywhere, 0 GPS required) ---
+  const handleSimulateWalk = () => {
+    if (!currentCoords) {
+      const baseLat = selectedMember?.lastLat || 37.7749;
+      const baseLng = selectedMember?.lastLng || -122.4194;
+      setCurrentCoords({ lat: baseLat, lng: baseLng });
+    }
+    setCurrentCoords(prev => {
+      if (!prev) return { lat: 37.7749, lng: -122.4194 };
+      const next = {
+        lat: prev.lat + (Math.random() - 0.45) * 0.0015,
+        lng: prev.lng + (Math.random() - 0.45) * 0.0015
+      };
+      // Trigger update
+      handlePositionUpdate({
+        lat: next.lat,
+        lng: next.lng,
+        accuracy: 8,
+        speed: 1.4, // ~5 km/h walk
+        heading: null
+      });
+      return next;
+    });
+    setGpsStatus('active');
   };
 
   // --- Demo Simulation Loop ---
@@ -417,8 +392,10 @@ export default function App() {
     setMemberName(memberName || 'Alex (Me)');
     setMemberRole('Son');
     setMemberAvatar('🧑');
+    setCurrentCoords({ lat: DEMO_MEMBERS[0].lastLat, lng: DEMO_MEMBERS[0].lastLng });
+    setGpsStatus('active');
 
-    // Simulate minor movement for dad & mom
+    // Smooth movement for Dad
     if (demoIntervalRef.current) clearInterval(demoIntervalRef.current);
     demoIntervalRef.current = window.setInterval(() => {
       setMembers(prev =>
@@ -426,15 +403,15 @@ export default function App() {
           if (m.id === 'demo-dad') {
             return {
               ...m,
-              lastLat: m.lastLat + (Math.random() - 0.5) * 0.001,
-              lastLng: m.lastLng + (Math.random() - 0.5) * 0.001,
+              lastLat: m.lastLat + (Math.random() - 0.5) * 0.0008,
+              lastLng: m.lastLng + (Math.random() - 0.5) * 0.0008,
               lastUpdated: new Date()
             };
           }
           return m;
         })
       );
-    }, 8000);
+    }, 10000);
   };
 
   // --- Join Circle Handler ---
@@ -456,14 +433,12 @@ export default function App() {
       if (circleDoc.exists()) {
         circleData = circleDoc.data() as GridCircle;
       } else {
-        // Fallback: check query in case id property was stored differently
         const q = query(collection(db, 'grids'), where('id', '==', pin));
         const snap = await getDocs(q);
         if (snap.empty) return false;
         circleData = snap.docs[0].data() as GridCircle;
       }
 
-      // Persist Profile & Circle
       localStorage.setItem(MEMBER_NAME_KEY, name);
       localStorage.setItem(MEMBER_ROLE_KEY, role);
       localStorage.setItem(MEMBER_AVATAR_KEY, avatar);
@@ -476,7 +451,6 @@ export default function App() {
       setCurrentCircle(circleData);
       setIsDemoMode(false);
 
-      // Register device immediately
       const memberDocId = `${pin}_${deviceId}`;
       await setDoc(doc(db, 'devices', memberDocId), {
         id: memberDocId,
@@ -492,9 +466,7 @@ export default function App() {
       }, { merge: true });
 
       return true;
-    } catch (err) {
-      console.error('Failed to join circle:', err);
-      // If Firestore failed, offer demo mode
+    } catch {
       startDemoCircle();
       return true;
     }
@@ -534,7 +506,6 @@ export default function App() {
       setSafeZones(newCircle.safeZones || []);
       setIsDemoMode(false);
 
-      // Register member device
       const memberDocId = `${pin}_${deviceId}`;
       await setDoc(doc(db, 'devices', memberDocId), {
         id: memberDocId,
@@ -550,9 +521,7 @@ export default function App() {
       }, { merge: true });
 
       return true;
-    } catch (err) {
-      console.error('Failed to create circle:', err);
-      // Fallback to local circle
+    } catch {
       const fallbackCircle: GridCircle = {
         id: pin,
         name,
@@ -565,43 +534,31 @@ export default function App() {
     }
   };
 
-  // --- Add Safe Zone ---
+  // Safe zones handlers
   const handleAddSafeZone = async (zone: Omit<SafeZone, 'id'>) => {
-    const newZone: SafeZone = {
-      id: `zone_${Date.now()}`,
-      ...zone
-    };
+    const newZone: SafeZone = { id: `zone_${Date.now()}`, ...zone };
     const updated = [...safeZones, newZone];
     setSafeZones(updated);
 
     if (currentCircle && !isDemoMode) {
       try {
-        await updateDoc(doc(db, 'grids', currentCircle.id), {
-          safeZones: updated
-        });
-      } catch (err) {
-        console.warn('Could not sync safe zone to firestore:', err);
-      }
+        await updateDoc(doc(db, 'grids', currentCircle.id), { safeZones: updated });
+      } catch {}
     }
   };
 
-  // --- Delete Safe Zone ---
   const handleDeleteSafeZone = async (zoneId: string) => {
     const updated = safeZones.filter(z => z.id !== zoneId);
     setSafeZones(updated);
 
     if (currentCircle && !isDemoMode) {
       try {
-        await updateDoc(doc(db, 'grids', currentCircle.id), {
-          safeZones: updated
-        });
-      } catch (err) {
-        console.warn('Could not sync zone deletion:', err);
-      }
+        await updateDoc(doc(db, 'grids', currentCircle.id), { safeZones: updated });
+      } catch {}
     }
   };
 
-  // --- SOS Alert Handlers ---
+  // SOS handlers
   const handleTriggerSos = async () => {
     if (!currentCircle) return;
     const memberDocId = `${currentCircle.id}_${deviceId}`;
@@ -612,9 +569,7 @@ export default function App() {
           isSosActive: true,
           sosTimestamp: serverTimestamp()
         });
-      } catch (err) {
-        console.error('SOS trigger error:', err);
-      }
+      } catch {}
     } else {
       setMembers(prev =>
         prev.map(m => m.id === memberDocId ? { ...m, isSosActive: true } : m)
@@ -629,12 +584,8 @@ export default function App() {
 
     if (!isDemoMode) {
       try {
-        await updateDoc(doc(db, 'devices', memberDocId), {
-          isSosActive: false
-        });
-      } catch (err) {
-        console.error('SOS cancel error:', err);
-      }
+        await updateDoc(doc(db, 'devices', memberDocId), { isSosActive: false });
+      } catch {}
     } else {
       setMembers(prev =>
         prev.map(m => m.id === memberDocId ? { ...m, isSosActive: false } : m)
@@ -642,7 +593,7 @@ export default function App() {
     }
   };
 
-  // --- Check-In Post Handler ---
+  // Check-In handler
   const handleSendCheckIn = async (message: string) => {
     if (!currentCircle) return;
     const memberDocId = `${currentCircle.id}_${deviceId}`;
@@ -659,16 +610,14 @@ export default function App() {
     if (!isDemoMode) {
       try {
         await addDoc(collection(db, `grids/${currentCircle.id}/checkins`), newCheckIn);
-      } catch (err) {
-        console.error('Failed to post check-in:', err);
-      }
+      } catch {}
     } else {
       setCheckIns(prev => [newCheckIn, ...prev]);
     }
     setShowCheckInModal(false);
   };
 
-  // --- Clear History Handler ---
+  // Clear history handler
   const handleClearHistory = async () => {
     if (!currentCircle) return;
     const memberDocId = `${currentCircle.id}_${deviceId}`;
@@ -680,15 +629,13 @@ export default function App() {
         snap.docs.forEach(d => batch.delete(d.ref));
         await batch.commit();
         setHistory([]);
-      } catch (err) {
-        console.error('Failed to clear history:', err);
-      }
+      } catch {}
     } else {
       setHistory([]);
     }
   };
 
-  // --- Profile Update ---
+  // Profile update
   const handleUpdateProfile = async (name: string, role: MemberRole, avatar: string) => {
     setMemberName(name);
     setMemberRole(role);
@@ -700,19 +647,13 @@ export default function App() {
     if (currentCircle && !isDemoMode) {
       const memberDocId = `${currentCircle.id}_${deviceId}`;
       try {
-        await updateDoc(doc(db, 'devices', memberDocId), {
-          name,
-          role,
-          avatar
-        });
-      } catch (err) {
-        console.warn('Profile update sync error:', err);
-      }
+        await updateDoc(doc(db, 'devices', memberDocId), { name, role, avatar });
+      } catch {}
     }
     setShowSettingsModal(false);
   };
 
-  // --- Leave Circle ---
+  // Leave circle
   const handleLeaveCircle = () => {
     stopTracking();
     localStorage.removeItem(CIRCLE_PIN_KEY);
@@ -722,7 +663,6 @@ export default function App() {
     setShowSettingsModal(false);
   };
 
-  // Copy Circle Code Helper
   const handleCopyCode = async () => {
     if (!currentCircle) return;
     try {
@@ -732,11 +672,9 @@ export default function App() {
     } catch {}
   };
 
-  // Active SOS alert detection across all circle members
   const activeSosMember = members.find(m => m.isSosActive) || null;
   const isCurrentUserSos = activeSosMember?.id === `${currentCircle?.id}_${deviceId}`;
 
-  // If user hasn't joined or created a circle, show onboarding screen
   if (!currentCircle) {
     return (
       <OnboardingModal
@@ -753,13 +691,13 @@ export default function App() {
   const currentMember = members.find(m => m.id === `${currentCircle.id}_${deviceId}`) || null;
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 flex flex-col font-sans">
       {/* Top Application Header */}
-      <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200/90 dark:border-slate-800 px-4 py-2.5">
+      <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xs border-b border-slate-200/90 dark:border-slate-800 px-4 py-2.5">
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
           {/* Left: Circle Name & Code */}
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 text-white flex items-center justify-center font-bold text-lg shadow-sm shadow-blue-500/20 shrink-0">
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 text-white flex items-center justify-center font-bold text-lg shadow-xs shadow-blue-500/20 shrink-0">
               <Users className="w-5 h-5" />
             </div>
 
@@ -776,7 +714,7 @@ export default function App() {
                 )}
               </div>
 
-              {/* Circle PIN Pill with 1-click Copy */}
+              {/* Circle PIN Pill */}
               <button
                 onClick={handleCopyCode}
                 className="mt-0.5 inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 group"
@@ -795,37 +733,47 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right: Quick Action Controls */}
+          {/* Right: Actions */}
           <div className="flex items-center gap-2 sm:gap-3">
-            {/* Live GPS Sharing Toggle */}
+            {/* Live GPS Toggle */}
             <button
               onClick={handleToggleTracking}
-              className={`px-3.5 py-2 rounded-2xl text-xs font-bold transition-all flex items-center gap-2 shadow-xs ${
+              className={`px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-2xl text-xs font-bold transition-all flex items-center gap-2 shadow-xs ${
                 isTracking
-                  ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/20 animate-pulse'
+                  ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
                   : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200'
               }`}
             >
-              <Radio className={`w-3.5 h-3.5 ${isTracking ? 'animate-spin' : ''}`} />
+              <Radio className={`w-3.5 h-3.5 ${isTracking ? 'animate-pulse' : ''}`} />
               <span className="hidden sm:inline">
-                {isTracking ? 'GPS Active' : 'Enable Live GPS'}
+                {isTracking ? 'GPS Active' : 'Start GPS'}
               </span>
               <span className="sm:hidden">
                 {isTracking ? 'Active' : 'GPS'}
               </span>
             </button>
 
-            {/* Check-in Quick Ping */}
+            {/* Simulated Walk Button (Instant Test on Any Device) */}
+            <button
+              onClick={handleSimulateWalk}
+              className="p-2 sm:px-3 sm:py-2 rounded-2xl bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/60 dark:hover:bg-blue-900/60 text-blue-600 dark:text-blue-400 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+              title="Step / Walk GPS Forward (Instant Test)"
+            >
+              <LocateFixed className="w-4 h-4" />
+              <span className="hidden sm:inline">Step GPS</span>
+            </button>
+
+            {/* Check-ins */}
             <button
               onClick={() => setShowCheckInModal(true)}
               className="p-2 sm:px-3 sm:py-2 rounded-2xl bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 text-indigo-600 dark:text-indigo-400 text-xs font-semibold flex items-center gap-1.5 transition-colors"
-              title="Send Family Check-in"
+              title="Family Check-in"
             >
               <MessageSquare className="w-4 h-4" />
               <span className="hidden sm:inline">Check-in</span>
             </button>
 
-            {/* Safe Places Modal Toggle */}
+            {/* Safe Places */}
             <button
               onClick={() => setShowSafeZonesModal(true)}
               className="p-2 sm:px-3 sm:py-2 rounded-2xl bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/60 dark:hover:bg-emerald-900/60 text-emerald-600 dark:text-emerald-400 text-xs font-semibold flex items-center gap-1.5 transition-colors"
@@ -835,10 +783,10 @@ export default function App() {
               <span className="hidden sm:inline">Places</span>
             </button>
 
-            {/* SOS Emergency Trigger */}
+            {/* SOS Emergency */}
             <button
               onClick={() => setShowSosModal(true)}
-              className="p-2 sm:px-3.5 sm:py-2 rounded-2xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm shadow-red-500/20 active:scale-95"
+              className="p-2 sm:px-3 sm:py-2 rounded-2xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs active:scale-95"
               title="Emergency SOS"
             >
               <ShieldAlert className="w-4 h-4" />
@@ -857,31 +805,61 @@ export default function App() {
         </div>
       </header>
 
+      {/* GPS Status / Feedback Strip */}
+      {gpsStatus !== 'idle' && (
+        <div className={`px-4 py-1.5 text-xs font-semibold flex items-center justify-between border-b ${
+          gpsStatus === 'active' 
+            ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900'
+            : gpsStatus === 'searching'
+              ? 'bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-900'
+              : gpsStatus === 'approximate'
+                ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-900'
+                : 'bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-900'
+        }`}>
+          <div className="flex items-center gap-2">
+            <Radio className="w-3.5 h-3.5 animate-pulse" />
+            <span>
+              {gpsStatus === 'active' && `GPS Locked (Accuracy: ±${gpsAccuracy}m)`}
+              {gpsStatus === 'searching' && (gpsMessage || 'Acquiring GPS Satellite signal...')}
+              {gpsStatus === 'approximate' && 'Using Network / City Location (Wi-Fi/IP)'}
+              {(gpsStatus === 'denied' || gpsStatus === 'unavailable' || gpsStatus === 'insecure') && (gpsMessage || 'GPS requires browser location permission.')}
+            </span>
+          </div>
+
+          {(gpsStatus === 'denied' || gpsStatus === 'unavailable' || gpsStatus === 'insecure') && (
+            <button
+              onClick={handleSimulateWalk}
+              className="underline text-[11px] font-bold hover:opacity-80"
+            >
+              Use Step Simulator &rarr;
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Emergency Active Banner */}
       {activeSosMember && (
-        <div className="bg-red-600 text-white py-2.5 px-4 text-center font-bold text-xs flex items-center justify-center gap-2 shadow-md animate-pulse">
+        <div className="bg-red-600 text-white py-2 px-4 text-center font-bold text-xs flex items-center justify-center gap-2 shadow-xs">
           <ShieldAlert className="w-4 h-4" />
-          <span>EMERGENCY ALERT: {activeSosMember.name} has triggered SOS!</span>
-          <a
-            href={getDirectionsUrl(activeSosMember.lastLat, activeSosMember.lastLng)}
-            target="_blank"
-            rel="noopener noreferrer"
+          <span>EMERGENCY SOS: {activeSosMember.name} needs assistance!</span>
+          <button
+            onClick={() => setNavigatingMember(activeSosMember)}
             className="underline ml-2 hover:text-red-100"
           >
-            Navigate Now &rarr;
-          </a>
+            Open Navigation &rarr;
+          </button>
         </div>
       )}
 
       {/* Main Workspace */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Interactive Map & Live Stats (8 cols on desktop) */}
-        <div className="lg:col-span-8 flex flex-col gap-4">
-          {/* Selected Member Quick Info Card (Floating Bar) */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
+        {/* Left Column: Interactive Map (8 cols on desktop) */}
+        <div className="lg:col-span-8 flex flex-col gap-3.5">
+          {/* Selected Member Quick Info Card */}
           {selectedMember && (
-            <div className="p-3.5 bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-3xl flex items-center justify-between gap-3 shadow-xs">
+            <div className="p-3 bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-3xl flex items-center justify-between gap-3 shadow-xs">
               <div className="flex items-center gap-3">
-                <span className="text-2xl p-2 bg-slate-100 dark:bg-slate-800 rounded-2xl shadow-inner">
+                <span className="text-2xl p-1.5 bg-slate-100 dark:bg-slate-800 rounded-2xl shadow-inner">
                   {selectedMember.avatar || '👤'}
                 </span>
                 <div>
@@ -909,7 +887,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Weather & Directions */}
+              {/* Weather & Fast Navigation */}
               <div className="flex items-center gap-2">
                 {weather && (
                   <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 dark:bg-slate-800/80 rounded-2xl border border-slate-200/80 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300">
@@ -918,25 +896,24 @@ export default function App() {
                   </div>
                 )}
 
-                <a
-                  href={getDirectionsUrl(selectedMember.lastLat, selectedMember.lastLng)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1 shadow-sm transition-colors"
+                <button
+                  onClick={() => setNavigatingMember(selectedMember)}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 shadow-xs transition-colors"
                 >
                   <Navigation className="w-3.5 h-3.5" />
                   <span>Navigate</span>
-                </a>
+                </button>
               </div>
             </div>
           )}
 
-          {/* Leaflet Map Visualizer */}
-          <div className="flex-1 min-h-[460px] rounded-3xl overflow-hidden shadow-sm">
+          {/* Optimized Leaflet Map */}
+          <div className="flex-1 min-h-[420px] rounded-3xl overflow-hidden shadow-xs">
             <Map
               members={members}
               selectedMember={selectedMember}
               onSelectMember={(m) => setSelectedMember(m)}
+              onNavigateMember={(m) => setNavigatingMember(m)}
               safeZones={safeZones}
               history={history}
               currentUserId={`${currentCircle.id}_${deviceId}`}
@@ -946,8 +923,8 @@ export default function App() {
           </div>
         </div>
 
-        {/* Right Column: Family Members, Timeline, Activity Feed (4 cols on desktop) */}
-        <div className="lg:col-span-4 flex flex-col gap-4">
+        {/* Right Column: Family Members, Timeline, Feed (4 cols) */}
+        <div className="lg:col-span-4 flex flex-col gap-3.5">
           {/* Navigation Sub-tabs */}
           <div className="flex bg-slate-200/70 dark:bg-slate-800/80 p-1 rounded-2xl">
             <button
@@ -978,25 +955,25 @@ export default function App() {
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
               }`}
             >
-              Check-ins ({checkIns.length})
+              Feed ({checkIns.length})
             </button>
           </div>
 
-          {/* Tab Content 1: Family Member Cards */}
+          {/* Members List */}
           {(activeTab === 'members' || activeTab === 'map') && (
             <div className="flex-1 flex flex-col gap-2.5 overflow-y-auto max-h-[580px] pr-1">
               {members.length === 0 ? (
-                <div className="text-center py-12 px-4 bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800">
-                  <div className="text-4xl mb-2">👨‍👩‍👧‍👦</div>
+                <div className="text-center py-10 px-4 bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800">
+                  <div className="text-3xl mb-2">👨‍👩‍👧‍👦</div>
                   <h4 className="font-bold text-slate-800 dark:text-slate-100 text-sm">
-                    No Members in this Circle Yet
+                    No Members Detected
                   </h4>
                   <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto">
-                    Share your Circle Code ({currentCircle.id}) with your family members to start tracking!
+                    Share your Circle Code ({currentCircle.id}) with family members to start live tracking!
                   </p>
                   <button
                     onClick={handleCopyCode}
-                    className="mt-4 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-colors shadow-sm"
+                    className="mt-3.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-colors shadow-xs"
                   >
                     <Share2 className="w-3.5 h-3.5" />
                     <span>Share Circle Invite</span>
@@ -1010,21 +987,20 @@ export default function App() {
                     currentUser={currentMember}
                     isSelected={selectedMember?.id === member.id}
                     onSelect={(m) => setSelectedMember(m)}
+                    onNavigate={(m) => setNavigatingMember(m)}
                   />
                 ))
               )}
 
               {/* Add member invite tip */}
-              <div className="p-3.5 bg-blue-50/60 dark:bg-blue-950/40 rounded-2xl border border-blue-100 dark:border-blue-900/40 text-xs text-blue-900 dark:text-blue-200 flex items-center justify-between mt-1">
+              <div className="p-3 bg-blue-50/60 dark:bg-blue-950/40 rounded-2xl border border-blue-100 dark:border-blue-900/40 text-xs text-blue-900 dark:text-blue-200 flex items-center justify-between mt-1">
                 <div>
-                  <span className="font-bold">Invite more family:</span>
-                  <p className="text-[11px] text-blue-700 dark:text-blue-300">
-                    Use code <span className="font-mono font-bold">{currentCircle.id}</span>
-                  </p>
+                  <span className="font-bold">Circle Code:</span>
+                  <span className="font-mono font-bold ml-1">{currentCircle.id}</span>
                 </div>
                 <button
                   onClick={handleCopyCode}
-                  className="px-2.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-[11px] font-semibold"
+                  className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[11px] font-semibold"
                 >
                   {copiedCode ? 'Copied' : 'Copy'}
                 </button>
@@ -1032,7 +1008,7 @@ export default function App() {
             </div>
           )}
 
-          {/* Tab Content 2: Trip History Timeline */}
+          {/* Timeline */}
           {activeTab === 'history' && selectedMember && (
             <div className="flex-1 max-h-[580px]">
               <TripTimeline
@@ -1044,7 +1020,7 @@ export default function App() {
             </div>
           )}
 
-          {/* Tab Content 3: Family Check-ins Feed */}
+          {/* Check-ins Feed */}
           {activeTab === 'checkins' && (
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 flex flex-col h-full max-h-[580px] shadow-xs">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
@@ -1053,17 +1029,17 @@ export default function App() {
                 </h4>
                 <button
                   onClick={() => setShowCheckInModal(true)}
-                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1 shadow-sm"
+                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1 shadow-xs"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>New Post</span>
+                  <span>Post</span>
                 </button>
               </div>
 
               <div className="flex-1 overflow-y-auto mt-3 space-y-2.5 pr-1">
                 {checkIns.length === 0 ? (
-                  <div className="text-center py-10 text-xs text-slate-400">
-                    No recent check-in updates. Tap "New Post" to check in!
+                  <div className="text-center py-8 text-xs text-slate-400">
+                    No recent check-in updates. Tap "Post" to send an update!
                   </div>
                 ) : (
                   checkIns.map((item) => (
@@ -1071,7 +1047,7 @@ export default function App() {
                       key={item.id}
                       className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 flex items-start gap-3"
                     >
-                      <span className="text-xl p-1.5 bg-white dark:bg-slate-800 rounded-xl shadow-xs">
+                      <span className="text-xl p-1 bg-white dark:bg-slate-800 rounded-xl shadow-xs">
                         {item.avatar || '👤'}
                       </span>
                       <div className="flex-1 min-w-0">
@@ -1096,7 +1072,19 @@ export default function App() {
         </div>
       </main>
 
-      {/* Modals */}
+      {/* Lightweight Fast Navigation Modal */}
+      <NavigationModal
+        isOpen={Boolean(navigatingMember)}
+        onClose={() => setNavigatingMember(null)}
+        targetMember={navigatingMember}
+        currentCoords={currentCoords}
+        onFocusMap={(m) => {
+          setSelectedMember(m);
+          setNavigatingMember(null);
+        }}
+      />
+
+      {/* Other Modals */}
       <SafeZonesModal
         isOpen={showSafeZonesModal}
         onClose={() => setShowSafeZonesModal(false)}

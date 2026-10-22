@@ -4,8 +4,7 @@ import {
   formatRelativeTime, 
   formatSpeed, 
   formatDistance, 
-  calculateDistanceMeters, 
-  getDirectionsUrl 
+  calculateDistanceMeters
 } from '../utils/geo';
 import { 
   Battery, 
@@ -13,9 +12,7 @@ import {
   BatteryWarning, 
   Navigation, 
   MapPin, 
-  AlertTriangle, 
-  ExternalLink,
-  ChevronRight
+  AlertTriangle
 } from 'lucide-react';
 
 interface FamilyMemberCardProps {
@@ -156,16 +153,18 @@ export const FamilyMemberCard: React.FC<FamilyMemberCardProps> = ({
             {formatRelativeTime(member.lastUpdated)}
           </span>
 
-          <a
-            href={getDirectionsUrl(member.lastLat, member.lastLng)}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            className="mt-2.5 p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-950 transition-colors"
-            title="Navigate to member"
-          >
-            <Navigation className="w-3.5 h-3.5" />
-          </a>
+          {onNavigate && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onNavigate(member);
+              }}
+              className="mt-2.5 p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-950 transition-colors"
+              title="Get Directions"
+            >
+              <Navigation className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
     </div>

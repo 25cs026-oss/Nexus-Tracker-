@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { 
   MapContainer, 
   TileLayer, 
@@ -11,7 +11,7 @@ import {
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { DeviceMember, SafeZone, HistoryPoint } from '../types';
-import { formatRelativeTime, formatSpeed, getDirectionsUrl } from '../utils/geo';
+import { formatRelativeTime, formatSpeed } from '../utils/geo';
 import { 
   Crosshair, 
   Navigation, 
@@ -19,7 +19,6 @@ import {
   Battery, 
   BatteryCharging, 
   AlertTriangle,
-  ExternalLink,
   MapPin
 } from 'lucide-react';
 
@@ -27,6 +26,7 @@ interface MapProps {
   members: DeviceMember[];
   selectedMember: DeviceMember | null;
   onSelectMember: (member: DeviceMember) => void;
+  onNavigateMember: (member: DeviceMember) => void;
   safeZones: SafeZone[];
   history: HistoryPoint[];
   currentUserId?: string;
@@ -39,29 +39,39 @@ const TILE_LAYERS = {
   streets: {
     name: 'Streets',
     url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    attribution: '&copy; OpenStreetMap'
   },
   satellite: {
     name: 'Satellite',
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    attribution: '&copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye'
+    attribution: '&copy; Esri'
   },
   dark: {
-    name: 'Modern Dark',
+    name: 'Voyager',
     url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
     attribution: '&copy; CARTO'
   }
 };
 
-// Creates a rich custom HTML Leaflet marker for a family member
-function createFamilyMarkerIcon(
-  member: DeviceMember, 
+// Memoized icon cache to prevent DOM thrashing
+const iconCache = new globalThis.Map<string, L.DivIcon>();
+
+function getMemoizedFamilyIcon(
+  member: DeviceMember,
   isSelected: boolean,
   isCurrentUser: boolean
-) {
+): L.DivIcon {
   const avatar = member.avatar || (member.name ? member.name.charAt(0).toUpperCase() : '👤');
-  const isSos = member.isSosActive;
+  const isSos = Boolean(member.isSosActive);
   const isOnline = Date.now() - (member.lastUpdated?.toMillis?.() || new Date(member.lastUpdated).getTime() || 0) < 180000;
+  const batteryKey = member.battery !== undefined ? member.battery : -1;
+  const chargingKey = Boolean(member.isCharging);
+
+  const cacheKey = `${member.id}_${isSelected}_${isCurrentUser}_${isSos}_${isOnline}_${batteryKey}_${chargingKey}_${avatar}`;
+
+  if (iconCache.has(cacheKey)) {
+    return iconCache.get(cacheKey)!;
+  }
 
   const borderColor = isSos 
     ? '#ef4444' 
@@ -74,7 +84,7 @@ function createFamilyMarkerIcon(
   const pulseEffect = isSos
     ? '<div class="absolute -inset-2 rounded-full bg-red-500/40 animate-ping"></div>'
     : isSelected
-      ? '<div class="absolute -inset-1.5 rounded-full bg-blue-500/30 animate-pulse"></div>'
+      ? '<div class="absolute -inset-1 rounded-full bg-blue-500/30"></div>'
       : '';
 
   const statusBadge = isSos
@@ -86,32 +96,35 @@ function createFamilyMarkerIcon(
         : '';
 
   const html = `
-    <div class="relative group cursor-pointer flex flex-col items-center">
+    <div class="relative group cursor-pointer flex flex-col items-center select-none" style="will-change: transform;">
       ${pulseEffect}
       <div 
-        class="w-10 h-10 rounded-full bg-white shadow-lg flex items-center justify-center text-lg font-bold border-2 transition-transform transform hover:scale-110"
-        style="border-color: ${borderColor}; box-shadow: 0 4px 14px rgba(0,0,0,0.25);"
+        class="w-10 h-10 rounded-full bg-white shadow-md flex items-center justify-center text-lg font-bold border-2"
+        style="border-color: ${borderColor};"
       >
-        <span class="select-none">${avatar}</span>
+        <span>${avatar}</span>
         ${statusBadge}
       </div>
-      <div class="mt-1 px-2 py-0.5 bg-slate-900/85 backdrop-blur-sm text-white text-[10px] font-semibold rounded-full shadow-md whitespace-nowrap pointer-events-none flex items-center gap-1 border border-white/20">
+      <div class="mt-1 px-2 py-0.5 bg-slate-900/85 backdrop-blur-xs text-white text-[10px] font-semibold rounded-full shadow-sm whitespace-nowrap pointer-events-none flex items-center gap-1 border border-white/20">
         <span>${member.name || 'Member'}</span>
-        ${member.battery !== undefined ? `<span class="text-[9px] opacity-80">(${member.battery}%)</span>` : ''}
+        ${member.battery !== undefined ? `<span class="opacity-80">(${member.battery}%)</span>` : ''}
       </div>
     </div>
   `;
 
-  return L.divIcon({
+  const icon = L.divIcon({
     className: 'custom-family-marker',
     html,
-    iconSize: [44, 60],
-    iconAnchor: [22, 30],
-    popupAnchor: [0, -32]
+    iconSize: [44, 56],
+    iconAnchor: [22, 28],
+    popupAnchor: [0, -30]
   });
+
+  iconCache.set(cacheKey, icon);
+  return icon;
 }
 
-// Controller for bounds fitting and centering
+// Controller for bounds fitting and centering with strict debounce
 function MapViewController({
   members,
   focusLocation,
@@ -122,26 +135,38 @@ function MapViewController({
   triggerFitAll: number;
 }) {
   const map = useMap();
+  const lastFocusRef = useRef<string>('');
 
-  // Smooth pan/zoom when focusLocation changes
+  // Smooth pan/zoom when focusLocation changes (debounced by coordinate equality)
   useEffect(() => {
-    if (focusLocation && !isNaN(focusLocation.lat) && !isNaN(focusLocation.lng)) {
-      map.setView([focusLocation.lat, focusLocation.lng], 16, { animate: true, duration: 1 });
-    }
-  }, [focusLocation, map]);
+    if (!focusLocation || isNaN(focusLocation.lat) || isNaN(focusLocation.lng)) return;
 
-  // Fit all markers when requested or on initial load with members
+    const coordKey = `${focusLocation.lat.toFixed(4)},${focusLocation.lng.toFixed(4)}`;
+    if (coordKey === lastFocusRef.current) return;
+    lastFocusRef.current = coordKey;
+
+    try {
+      map.setView([focusLocation.lat, focusLocation.lng], 15, { animate: false });
+    } catch {
+      // Map may be unmounting
+    }
+  }, [focusLocation?.lat, focusLocation?.lng, map]);
+
+  // Fit all markers when requested
   useEffect(() => {
-    if (members.length === 0) return;
+    if (triggerFitAll === 0 || members.length === 0) return;
 
-    if (members.length === 1) {
-      map.setView([members[0].lastLat, members[0].lastLng], 15, { animate: true });
-      return;
+    try {
+      if (members.length === 1) {
+        map.setView([members[0].lastLat, members[0].lastLng], 15, { animate: false });
+        return;
+      }
+      const bounds = L.latLngBounds(members.map(m => [m.lastLat, m.lastLng]));
+      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 16, animate: false });
+    } catch {
+      // Ignore fit error
     }
-
-    const bounds = L.latLngBounds(members.map(m => [m.lastLat, m.lastLng]));
-    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16, animate: true });
-  }, [triggerFitAll, map]);
+  }, [triggerFitAll, members, map]);
 
   return null;
 }
@@ -150,36 +175,38 @@ export const Map: React.FC<MapProps> = ({
   members,
   selectedMember,
   onSelectMember,
+  onNavigateMember,
   safeZones,
   history,
   currentUserId,
-  focusLocation,
-  theme = 'light'
+  focusLocation
 }) => {
   const [activeLayer, setActiveLayer] = useState<'streets' | 'satellite' | 'dark'>('streets');
   const [triggerFit, setTriggerFit] = useState(0);
 
-  // Compute default center
+  // Compute default center once upon mounting
   const defaultCenter = useMemo<[number, number]>(() => {
     if (focusLocation) return [focusLocation.lat, focusLocation.lng];
     if (selectedMember) return [selectedMember.lastLat, selectedMember.lastLng];
     if (members.length > 0) return [members[0].lastLat, members[0].lastLng];
-    return [37.7749, -122.4194]; // Default friendly city center
+    return [37.7749, -122.4194];
   }, []);
 
   return (
-    <div className="relative w-full h-full min-h-[420px] rounded-2xl overflow-hidden shadow-sm border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-900 z-0">
+    <div className="relative w-full h-full min-h-[380px] rounded-2xl overflow-hidden shadow-xs border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-900 z-0">
       <MapContainer
         center={defaultCenter}
         zoom={14}
         scrollWheelZoom={true}
-        className="w-full h-full min-h-[420px]"
+        preferCanvas={true}
+        className="w-full h-full min-h-[380px]"
         zoomControl={false}
       >
         {/* Active Tile Layer */}
         <TileLayer
           attribution={TILE_LAYERS[activeLayer].attribution}
           url={TILE_LAYERS[activeLayer].url}
+          maxZoom={19}
         />
 
         <MapViewController
@@ -197,7 +224,7 @@ export const Map: React.FC<MapProps> = ({
               pathOptions={{
                 color: '#10b981',
                 fillColor: '#10b981',
-                fillOpacity: 0.15,
+                fillOpacity: 0.12,
                 weight: 2,
                 dashArray: '4, 6'
               }}
@@ -209,7 +236,7 @@ export const Map: React.FC<MapProps> = ({
                     <span>{zone.name}</span>
                   </div>
                   <div className="text-[11px] text-slate-500 mt-1">
-                    Safe Zone Radius: {zone.radius}m
+                    Radius: {zone.radius}m
                   </div>
                 </div>
               </Popup>
@@ -222,9 +249,9 @@ export const Map: React.FC<MapProps> = ({
           <Polyline
             positions={history.map(h => [h.lat, h.lng])}
             color="#3b82f6"
-            weight={4}
-            opacity={0.8}
-            dashArray="6, 8"
+            weight={3.5}
+            opacity={0.75}
+            dashArray="5, 8"
           />
         )}
 
@@ -232,7 +259,7 @@ export const Map: React.FC<MapProps> = ({
         {members.map(member => {
           const isSelected = selectedMember?.id === member.id;
           const isCurrentUser = member.id === currentUserId;
-          const icon = createFamilyMarkerIcon(member, isSelected, isCurrentUser);
+          const icon = getMemoizedFamilyIcon(member, isSelected, isCurrentUser);
 
           return (
             <Marker
@@ -244,7 +271,7 @@ export const Map: React.FC<MapProps> = ({
               }}
             >
               <Popup className="member-popup" closeButton={false}>
-                <div className="p-3 text-slate-800 dark:text-slate-100 font-sans min-w-[210px]">
+                <div className="p-3 text-slate-800 dark:text-slate-100 font-sans min-w-[200px]">
                   <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
                     <div className="flex items-center gap-2">
                       <span className="text-xl">{member.avatar || '👤'}</span>
@@ -267,7 +294,7 @@ export const Map: React.FC<MapProps> = ({
                   {member.isSosActive && (
                     <div className="my-2 p-2 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 rounded-lg flex items-center gap-2 text-red-600 dark:text-red-400 text-xs font-bold animate-pulse">
                       <AlertTriangle className="w-4 h-4 shrink-0" />
-                      <span>EMERGENCY SOS ALERT!</span>
+                      <span>SOS ACTIVE!</span>
                     </div>
                   )}
 
@@ -299,17 +326,18 @@ export const Map: React.FC<MapProps> = ({
                     </div>
                   </div>
 
-                  <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800 flex gap-2">
-                    <a
-                      href={getDirectionsUrl(member.lastLat, member.lastLng)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex-1 py-1.5 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-1 transition-colors shadow-sm"
+                  {/* Fast Directions Button */}
+                  <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onNavigateMember(member);
+                      }}
+                      className="w-full py-1.5 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-xs"
                     >
                       <Navigation className="w-3.5 h-3.5" />
-                      <span>Directions</span>
-                      <ExternalLink className="w-3 h-3 ml-0.5 opacity-70" />
-                    </a>
+                      <span>Get Directions</span>
+                    </button>
                   </div>
                 </div>
               </Popup>
@@ -318,43 +346,43 @@ export const Map: React.FC<MapProps> = ({
         })}
       </MapContainer>
 
-      {/* Floating Floating Controls Bar (Top Right) */}
-      <div className="absolute top-4 right-4 z-[400] flex flex-col gap-2">
+      {/* Floating Controls Bar (Top Right) */}
+      <div className="absolute top-3 right-3 z-[400] flex flex-col gap-2">
         {/* Layer Switcher */}
         <div className="relative group">
           <button
-            className="w-10 h-10 bg-white/95 dark:bg-slate-800/95 backdrop-blur-sm text-slate-700 dark:text-slate-200 rounded-xl shadow-lg border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all hover:scale-105"
-            title="Change Map Style"
+            className="w-9 h-9 bg-white/95 dark:bg-slate-800/95 backdrop-blur-xs text-slate-700 dark:text-slate-200 rounded-xl shadow-md border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all"
+            title="Map Style"
           >
-            <Layers className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+            <Layers className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
           </button>
-          <div className="absolute right-0 top-12 hidden group-hover:flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl p-1.5 gap-1 min-w-[130px] z-50">
+          <div className="absolute right-0 top-11 hidden group-hover:flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl p-1.5 gap-1 min-w-[120px] z-50">
             <button
               onClick={() => setActiveLayer('streets')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
                 activeLayer === 'streets' 
                   ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
-                  : 'hover:bg-slate-50 dark:hover:bg-slate-700/50 text-slate-700 dark:text-slate-300'
+                  : 'text-slate-700 dark:text-slate-300'
               }`}
             >
-              🗺️ Standard
+              🗺️ Streets
             </button>
             <button
               onClick={() => setActiveLayer('satellite')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
                 activeLayer === 'satellite' 
                   ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
-                  : 'hover:bg-slate-50 dark:hover:bg-slate-700/50 text-slate-700 dark:text-slate-300'
+                  : 'text-slate-700 dark:text-slate-300'
               }`}
             >
               🛰️ Satellite
             </button>
             <button
               onClick={() => setActiveLayer('dark')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
                 activeLayer === 'dark' 
                   ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold' 
-                  : 'hover:bg-slate-50 dark:hover:bg-slate-700/50 text-slate-700 dark:text-slate-300'
+                  : 'text-slate-700 dark:text-slate-300'
               }`}
             >
               🌙 Voyager
@@ -365,18 +393,17 @@ export const Map: React.FC<MapProps> = ({
         {/* Fit All Members */}
         <button
           onClick={() => setTriggerFit(prev => prev + 1)}
-          className="w-10 h-10 bg-white/95 dark:bg-slate-800/95 backdrop-blur-sm text-slate-700 dark:text-slate-200 rounded-xl shadow-lg border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all hover:scale-105"
-          title="Fit All Family Members"
+          className="w-9 h-9 bg-white/95 dark:bg-slate-800/95 backdrop-blur-xs text-slate-700 dark:text-slate-200 rounded-xl shadow-md border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all"
+          title="Fit All Members"
         >
-          <Crosshair className="w-5 h-5 text-slate-700 dark:text-slate-200" />
+          <Crosshair className="w-4 h-4 text-slate-700 dark:text-slate-200" />
         </button>
       </div>
 
       {/* Floating Active Members Badge (Bottom Left) */}
-      <div className="absolute bottom-4 left-4 z-[400] flex items-center gap-2 px-3 py-1.5 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border border-slate-200/80 dark:border-slate-700 rounded-full shadow-md text-xs text-slate-700 dark:text-slate-300 font-medium pointer-events-none">
-        <span className="relative flex h-2.5 w-2.5">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+      <div className="absolute bottom-3 left-3 z-[400] flex items-center gap-2 px-3 py-1 bg-white/90 dark:bg-slate-900/90 backdrop-blur-xs border border-slate-200/80 dark:border-slate-700 rounded-full shadow-xs text-xs text-slate-700 dark:text-slate-300 font-medium pointer-events-none">
+        <span className="relative flex h-2 w-2">
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
         </span>
         <span>{members.length} {members.length === 1 ? 'member' : 'members'} online</span>
       </div>
