@@ -50,6 +50,9 @@ public class MainActivity extends AppCompatActivity {
     private static final String LOCAL_ORIGIN = "https://localhost";
     private static final String LOCAL_INDEX = LOCAL_ORIGIN + "/index.html";
 
+    // Default live cloud URL deployed on Vercel
+    private static final String DEFAULT_CLOUD_URL = "https://nexus-tracker-inky.vercel.app";
+
     // Remote URL config on GitHub for instant OTA updates without rebuilding APK
     private static final String REMOTE_CONFIG_URL = "https://raw.githubusercontent.com/25cs026-oss/Nexus-Tracker-/main/app-url.txt";
     private static final String PREF_KEY_CLOUD_URL = "active_cloud_url";
@@ -192,8 +195,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void loadApp() {
-        String cloudUrl = prefs.getString(PREF_KEY_CLOUD_URL, "").trim();
-        if (!cloudUrl.isEmpty() && isNetworkAvailable()) {
+        String cloudUrl = prefs.getString(PREF_KEY_CLOUD_URL, DEFAULT_CLOUD_URL).trim();
+        if (cloudUrl.isEmpty()) {
+            cloudUrl = DEFAULT_CLOUD_URL;
+        }
+        if (isNetworkAvailable()) {
             hasFallenBackToLocal = false;
             Log.d(TAG, "Loading live cloud URL: " + cloudUrl);
             webView.loadUrl(cloudUrl);

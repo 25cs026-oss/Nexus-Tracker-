@@ -1,1 +1,1 @@
-https://nexus-tracker.vercel.app
+https://nexus-tracker-inky.vercel.app
