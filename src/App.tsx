@@ -226,6 +226,7 @@ export default function App() {
   const lastSavedCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
   const isAppHiddenRef = useRef<boolean>(false);
   const heartbeatIntervalRef = useRef<number | null>(null);
+  const lastPlaceNameRef = useRef<string | null | undefined>(undefined);
 
   // Dedicated Heartbeat sync: ensures Mom, Dad & all members' lastUpdated in Firestore
   // is continuously updated every 15-25 seconds even when device is stationary (desk, pocket).
@@ -268,6 +269,43 @@ export default function App() {
 
     if (currentPlace?.name) {
       payload.currentPlace = currentPlace.name;
+    }
+
+    // Auto-detect arrival/departure events for the Family Activity Feed
+    const newPlaceName = currentPlace?.name || null;
+    if (lastPlaceNameRef.current !== undefined && lastPlaceNameRef.current !== newPlaceName) {
+      const prevPlace = lastPlaceNameRef.current;
+      lastPlaceNameRef.current = newPlaceName;
+
+      if (prevPlace !== null || newPlaceName !== null) {
+        const placeMessage = newPlaceName 
+          ? `🏡 Arrived at ${newPlaceName}`
+          : `🚗 Left ${prevPlace}`;
+
+        const autoPing: CheckInPing = {
+          id: `auto_${Date.now()}`,
+          deviceId: memberDocId,
+          memberName: memberName || 'Family Member',
+          avatar: memberAvatar,
+          message: placeMessage,
+          timestamp: new Date().toISOString()
+        };
+
+        setCheckIns(prev => {
+          const next = [autoPing, ...prev.filter(c => c.id !== autoPing.id)].slice(0, 30);
+          try { localStorage.setItem('nexus_cached_checkins', JSON.stringify(next)); } catch {}
+          return next;
+        });
+
+        // Broadcast to circle document in Firestore
+        try {
+          setDoc(doc(db, 'grids', currentCircle.id), {
+            feed: [autoPing, ...checkIns.slice(0, 29)]
+          }, { merge: true });
+        } catch {}
+      }
+    } else if (lastPlaceNameRef.current === undefined) {
+      lastPlaceNameRef.current = newPlaceName;
     }
 
     try {
@@ -719,14 +757,27 @@ export default function App() {
         const data = snap.data() as any;
         if (data.safeZones) setSafeZones(data.safeZones);
 
+        // Real-time Feed Sync from Circle Doc (guaranteed instant delivery across all members)
+        if (data.feed && Array.isArray(data.feed) && data.feed.length > 0) {
+          setCheckIns(data.feed);
+          try {
+            localStorage.setItem('nexus_cached_checkins', JSON.stringify(data.feed.slice(0, 30)));
+          } catch {}
+        }
+
         // Immediate Circle-Level SOS Broadcast Detection
         if (data.activeSos && data.activeSos.memberId !== memberDocId) {
           notificationManager.showSosAlertNotification(data.activeSos.memberName, data.activeSos.place);
           sirenAudio.start();
           setShowSosModal(true);
+        } else if (!data.activeSos && activeSosMember?.id !== memberDocId) {
+          sirenAudio.stop();
+          notificationManager.clearSosNotification();
         }
       }
-    }, () => {});
+    }, (err) => {
+      console.warn('Circle listener error:', err);
+    });
 
     // Devices in circle listener
     const devicesQuery = query(collection(db, 'devices'), where('gridId', '==', currentCircle.id));
@@ -1384,17 +1435,29 @@ export default function App() {
     };
 
     // Optimistic UI update so it appears instantly
-    setCheckIns(prev => [newCheckIn, ...prev.filter(c => c.id !== checkInId)]);
+    const updatedFeed = [newCheckIn, ...checkIns.filter(c => c.id !== checkInId)].slice(0, 30);
+    setCheckIns(updatedFeed);
+    try {
+      localStorage.setItem('nexus_cached_checkins', JSON.stringify(updatedFeed));
+    } catch {}
 
     // Notification broadcast
     notificationManager.showImportantNotification(`💬 ${sender} Check-in`, message);
 
     if (!isDemoMode) {
       try {
-        await setDoc(doc(db, 'grids', currentCircle.id, 'checkins', checkInId), {
-          ...newCheckIn,
-          timestamp: serverTimestamp()
+        // Save directly to circle document (instant sync to all family members)
+        await setDoc(doc(db, 'grids', currentCircle.id), {
+          feed: updatedFeed
         }, { merge: true });
+
+        // Also save to subcollection
+        try {
+          await setDoc(doc(db, 'grids', currentCircle.id, 'checkins', checkInId), {
+            ...newCheckIn,
+            timestamp: serverTimestamp()
+          }, { merge: true });
+        } catch {}
       } catch (err) {
         console.warn('Failed to save checkin to Firestore:', err);
       }
