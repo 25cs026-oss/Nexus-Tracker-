@@ -7,3 +7,6 @@ coverage/
 .vite/
 .env*
 !.env.example
+.gradle/
+**/build/
+local.properties
