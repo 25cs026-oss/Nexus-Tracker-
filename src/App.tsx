@@ -111,6 +111,51 @@ const getDeviceId = () => {
   return id;
 };
 
+// Strict sanitizer to guarantee 100% serializable Firestore objects without undefined values
+const sanitizeCheckIn = (item: any): CheckInPing => {
+  const id = String(item?.id || `chk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+  const deviceId = String(item?.deviceId || '');
+  const memberName = String(item?.memberName || 'Family Member');
+  const avatar = String(item?.avatar || '👤');
+  const message = String(item?.message || '').trim();
+
+  let timestamp: string;
+  if (typeof item?.timestamp === 'string' && item.timestamp.length > 0) {
+    timestamp = item.timestamp;
+  } else if (item?.timestamp?.toDate) {
+    timestamp = item.timestamp.toDate().toISOString();
+  } else if (item?.timestamp?.toMillis) {
+    timestamp = new Date(item.timestamp.toMillis()).toISOString();
+  } else if (item?.timestamp instanceof Date) {
+    timestamp = item.timestamp.toISOString();
+  } else if (typeof item?.timestamp === 'number') {
+    timestamp = new Date(item.timestamp).toISOString();
+  } else {
+    timestamp = new Date().toISOString();
+  }
+
+  const clean: CheckInPing = {
+    id,
+    deviceId,
+    memberName,
+    avatar,
+    message,
+    timestamp
+  };
+
+  if (typeof item?.lat === 'number' && !isNaN(item.lat)) {
+    clean.lat = item.lat;
+  }
+  if (typeof item?.lng === 'number' && !isNaN(item.lng)) {
+    clean.lng = item.lng;
+  }
+  if (item?.place && typeof item.place === 'string' && item.place.trim().length > 0) {
+    clean.place = item.place.trim();
+  }
+
+  return clean;
+};
+
 export default function App() {
   // Persistent User Profile
   const [deviceId] = useState<string>(getDeviceId);
@@ -180,7 +225,15 @@ export default function App() {
   const [members, setMembers] = useState<DeviceMember[]>([]);
   const [selectedMember, setSelectedMember] = useState<DeviceMember | null>(null);
   const [safeZones, setSafeZones] = useState<SafeZone[]>([]);
-  const [checkIns, setCheckIns] = useState<CheckInPing[]>([]);
+  const [checkIns, setCheckIns] = useState<CheckInPing[]>(() => {
+    try {
+      const saved = localStorage.getItem('nexus_cached_checkins');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const seenAlertedCheckInIds = useRef<Set<string>>(new Set());
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [weather, setWeather] = useState<{ temp: number; condition: string } | null>(null);
 
@@ -286,23 +339,21 @@ export default function App() {
           id: `auto_${Date.now()}`,
           deviceId: memberDocId,
           memberName: memberName || 'Family Member',
-          avatar: memberAvatar,
+          avatar: memberAvatar || '👤',
           message: placeMessage,
           timestamp: new Date().toISOString()
         };
 
+        const cleanAutoPing = sanitizeCheckIn(autoPing);
+
         setCheckIns(prev => {
-          const next = [autoPing, ...prev.filter(c => c.id !== autoPing.id)].slice(0, 30);
+          const next = [cleanAutoPing, ...prev.filter(c => c.id !== cleanAutoPing.id)].slice(0, 40);
           try { localStorage.setItem('nexus_cached_checkins', JSON.stringify(next)); } catch {}
           return next;
         });
 
-        // Broadcast to circle document in Firestore
-        try {
-          setDoc(doc(db, 'grids', currentCircle.id), {
-            feed: [autoPing, ...checkIns.slice(0, 29)]
-          }, { merge: true });
-        } catch {}
+        seenAlertedCheckInIds.current.add(cleanAutoPing.id);
+        payload.latestCheckIn = cleanAutoPing;
       }
     } else if (lastPlaceNameRef.current === undefined) {
       lastPlaceNameRef.current = newPlaceName;
@@ -786,19 +837,80 @@ export default function App() {
       
       const memberDocId = `${currentCircle.id}_${deviceId}`;
 
-      // Separate pending join requests (Host approval queue)
+      // 1. Unified Real-Time Family Activity Feed across all members
+      const aggregatedCheckIns: CheckInPing[] = [];
+      const seenCheckInIds = new Set<string>();
+
+      for (const m of rawList) {
+        if (Array.isArray(m.recentCheckIns)) {
+          for (const item of m.recentCheckIns) {
+            if (item && item.id && !seenCheckInIds.has(item.id)) {
+              seenCheckInIds.add(item.id);
+              aggregatedCheckIns.push(sanitizeCheckIn(item));
+            }
+          }
+        }
+        if (m.latestCheckIn && m.latestCheckIn.id && !seenCheckInIds.has(m.latestCheckIn.id)) {
+          seenCheckInIds.add(m.latestCheckIn.id);
+          aggregatedCheckIns.push(sanitizeCheckIn(m.latestCheckIn));
+        }
+      }
+
+      setCheckIns(prev => {
+        const full = [...aggregatedCheckIns];
+        for (const item of prev) {
+          if (item && item.id && !seenCheckInIds.has(item.id)) {
+            seenCheckInIds.add(item.id);
+            full.push(sanitizeCheckIn(item));
+          }
+        }
+        full.sort((a, b) => {
+          const tA = new Date(a.timestamp || 0).getTime();
+          const tB = new Date(b.timestamp || 0).getTime();
+          return tB - tA;
+        });
+        const result = full.slice(0, 40);
+
+        // Notify user if a NEW check-in from another member arrived
+        const newest = result[0];
+        if (newest && newest.deviceId !== memberDocId && !seenAlertedCheckInIds.current.has(newest.id)) {
+          seenAlertedCheckInIds.current.add(newest.id);
+          const ageSec = (Date.now() - new Date(newest.timestamp || 0).getTime()) / 1000;
+          if (ageSec < 300) {
+            notificationManager.showImportantNotification(
+              `💬 ${newest.memberName}: Check-in`,
+              newest.message || 'Shared a status update'
+            );
+            sirenAudio.playChime();
+          }
+        }
+
+        try {
+          localStorage.setItem('nexus_cached_checkins', JSON.stringify(result));
+        } catch {}
+        return result;
+      });
+
+      // 2. Separate pending join requests (Host approval queue)
       const pending = rawList.filter(m => m.status === 'pending' && m.id !== memberDocId);
       setPendingJoinRequests(pending);
 
       // Only approved members are shown in live tracking
       const approvedOnly = rawList.filter(m => m.status !== 'pending' || m.id === memberDocId);
 
-      // Real-time detection of external SOS alert
+      // 3. Real-time detection of external SOS alert
       const otherSos = approvedOnly.find(m => m.isSosActive && m.id !== memberDocId);
       if (otherSos) {
-        notificationManager.showSosAlertNotification(otherSos.name, otherSos.currentPlace);
-        sirenAudio.start();
-        setShowSosModal(true);
+        if (dismissedSosMemberId !== otherSos.id) {
+          setShowSosModal(true);
+          if (!isSirenMuted) {
+            sirenAudio.start();
+          }
+        }
+        if (lastAlertedSosId.current !== otherSos.id) {
+          lastAlertedSosId.current = otherSos.id;
+          notificationManager.showSosAlertNotification(otherSos.name, otherSos.currentPlace);
+        }
       }
 
       // Deduplicate: If multiple docs in Firestore share the same ID or name, keep only ONE clean item
@@ -859,33 +971,15 @@ export default function App() {
         const updated = list.find(m => m.id === prev.id);
         return updated || selfMember || list[0] || null;
       });
-    }, () => {});
-
-    // Check-ins listener (no compound index required, sort client-side)
-    const checkInsCol = collection(db, 'grids', currentCircle.id, 'checkins');
-    const unsubCheckIns = onSnapshot(checkInsCol, (snap) => {
-      const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as CheckInPing));
-      list.sort((a, b) => {
-        const tA = (a.timestamp as any)?.toMillis ? (a.timestamp as any).toMillis() : new Date(a.timestamp || 0).getTime();
-        const tB = (b.timestamp as any)?.toMillis ? (b.timestamp as any).toMillis() : new Date(b.timestamp || 0).getTime();
-        return tB - tA;
-      });
-      if (list.length > 0) {
-        setCheckIns(list);
-        try {
-          localStorage.setItem('nexus_cached_checkins', JSON.stringify(list.slice(0, 30)));
-        } catch {}
-      }
     }, (err) => {
-      console.warn('Checkins snapshot warning:', err);
+      console.warn('Devices listener error:', err);
     });
 
     return () => {
       unsubCircle();
       unsubDevices();
-      unsubCheckIns();
     };
-  }, [currentCircle?.id, isDemoMode, deviceId]);
+  }, [currentCircle?.id, isDemoMode, deviceId, dismissedSosMemberId, isSirenMuted]);
 
   // History listener
   useEffect(() => {
@@ -1069,6 +1163,7 @@ export default function App() {
         lastLng: userLng,
         lastUpdated: serverTimestamp(),
         gridId: circleId,
+        status: 'approved',
         battery: currentBattery?.level || 100,
         isCharging: currentBattery?.isCharging || false
       }, { merge: true });
@@ -1094,81 +1189,57 @@ export default function App() {
     }
   }, [currentCircle?.id]);
 
-  // Join Circle Handler with Host Permission Enforcement
+  // Join Circle Handler (Immediate entrance for anyone with the circle PIN)
   const handleJoinCircle = async (
     pin: string, 
     name: string, 
     role: MemberRole, 
     avatar: string
-  ): Promise<any> => {
+  ): Promise<boolean> => {
     notificationManager.requestPermission().catch(() => {});
-    if (pin === DEMO_PIN) {
+    const cleanPin = pin.trim().toUpperCase();
+    if (cleanPin === DEMO_PIN) {
       startDemoCircle();
-      return { success: true };
+      return true;
     }
 
     try {
-      const circleDoc = await getDoc(doc(db, 'grids', pin));
+      const circleDoc = await getDoc(doc(db, 'grids', cleanPin));
       let circleData: GridCircle;
 
       if (circleDoc.exists()) {
         circleData = circleDoc.data() as GridCircle;
       } else {
-        const q = query(collection(db, 'grids'), where('id', '==', pin));
+        const q = query(collection(db, 'grids'), where('id', '==', cleanPin));
         const snap = await getDocs(q);
-        if (snap.empty) return { success: false, error: 'Circle code not found' };
+        if (snap.empty) return false;
         circleData = snap.docs[0].data() as GridCircle;
       }
 
-      const memberDocId = `${pin}_${deviceId}`;
-      const isOwner = circleData.ownerId === deviceId;
-
-      // Check if user was already approved previously
-      const existingDoc = await getDoc(doc(db, 'devices', memberDocId));
-      const isAlreadyApproved = existingDoc.exists() && (existingDoc.data()?.status === 'approved' || !existingDoc.data()?.status);
+      const memberDocId = `${cleanPin}_${deviceId}`;
 
       let userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat;
       let userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng;
       if (!userLat || !userLng) {
         const ip = await geoService.getFastIpLocation();
-        userLat = ip?.lat || 21.2366;
-        userLng = ip?.lng || 72.7791;
+        userLat = ip?.lat || 19.0760;
+        userLng = ip?.lng || 72.8777;
       }
 
-      if (isOwner || isAlreadyApproved) {
-        // Owner or already-approved member enters immediately!
-        localStorage.setItem(MEMBER_NAME_KEY, name);
-        localStorage.setItem(MEMBER_ROLE_KEY, role);
-        localStorage.setItem(MEMBER_AVATAR_KEY, avatar);
-        localStorage.setItem(CIRCLE_PIN_KEY, pin);
-        localStorage.setItem(CIRCLE_DATA_KEY, JSON.stringify(circleData));
+      // Enter circle immediately with approved status
+      localStorage.setItem(MEMBER_NAME_KEY, name);
+      localStorage.setItem(MEMBER_ROLE_KEY, role);
+      localStorage.setItem(MEMBER_AVATAR_KEY, avatar);
+      localStorage.setItem(CIRCLE_PIN_KEY, cleanPin);
+      localStorage.setItem(CIRCLE_DATA_KEY, JSON.stringify(circleData));
 
-        setMemberName(name);
-        setMemberRole(role);
-        setMemberAvatar(avatar);
-        setCurrentCircle(circleData);
-        setIsDemoMode(false);
-        saveCircleToStorage(circleData, role, avatar, name);
+      setMemberName(name);
+      setMemberRole(role);
+      setMemberAvatar(avatar);
+      setCurrentCircle(circleData);
+      setIsDemoMode(false);
+      saveCircleToStorage(circleData, role, avatar, name);
 
-        await setDoc(doc(db, 'devices', memberDocId), {
-          id: memberDocId,
-          name,
-          role,
-          avatar,
-          lastLat: userLat,
-          lastLng: userLng,
-          lastUpdated: serverTimestamp(),
-          gridId: pin,
-          status: 'approved',
-          battery: currentBattery?.level || 100,
-          isCharging: currentBattery?.isCharging || false
-        }, { merge: true });
-
-        setMapFocusOverride({ lat: userLat, lng: userLng });
-        return { success: true };
-      }
-
-      // NEW MEMBER: Request permission from Circle Host!
       await setDoc(doc(db, 'devices', memberDocId), {
         id: memberDocId,
         name,
@@ -1177,22 +1248,17 @@ export default function App() {
         lastLat: userLat,
         lastLng: userLng,
         lastUpdated: serverTimestamp(),
-        gridId: pin,
-        status: 'pending',
+        gridId: cleanPin,
+        status: 'approved',
         battery: currentBattery?.level || 100,
         isCharging: currentBattery?.isCharging || false
       }, { merge: true });
 
-      return {
-        success: false,
-        pending: true,
-        circleName: circleData.name,
-        pin,
-        memberDocId
-      };
-    } catch {
-      startDemoCircle();
-      return { success: true };
+      setMapFocusOverride({ lat: userLat, lng: userLng });
+      return true;
+    } catch (err) {
+      console.error('Failed to join circle:', err);
+      return false;
     }
   };
 
@@ -1251,6 +1317,7 @@ export default function App() {
         lastLng: userLng,
         lastUpdated: serverTimestamp(),
         gridId: pin,
+        status: 'approved',
         battery: currentBattery?.level || 100,
         isCharging: currentBattery?.isCharging || false
       }, { merge: true });
@@ -1300,25 +1367,27 @@ export default function App() {
     const memberDocId = `${currentCircle.id}_${deviceId}`;
     const myName = memberName || 'Family Member';
     const placeName = currentPlace?.name || '';
+    const userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat || 19.0760;
+    const userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng || 72.8777;
 
     if (!isDemoMode) {
       try {
         await setDoc(doc(db, 'devices', memberDocId), {
+          id: memberDocId,
+          name: myName,
+          role: memberRole,
+          avatar: memberAvatar,
+          lastLat: userLat,
+          lastLng: userLng,
+          lastUpdated: serverTimestamp(),
+          gridId: currentCircle.id,
+          status: 'approved',
           isSosActive: true,
+          sosMessage: placeName ? `Near ${placeName}` : 'Emergency SOS',
           sosTimestamp: serverTimestamp()
         }, { merge: true });
-
-        // Circle-level high-visibility SOS broadcast
-        await setDoc(doc(db, 'grids', currentCircle.id), {
-          activeSos: {
-            memberId: memberDocId,
-            memberName: myName,
-            place: placeName,
-            timestamp: new Date().toISOString()
-          }
-        }, { merge: true });
       } catch (err) {
-        console.warn('Failed to broadcast SOS to Firestore:', err);
+        console.warn('Failed to broadcast SOS to Firestore devices:', err);
       }
     } else {
       setMembers(prev =>
@@ -1335,11 +1404,19 @@ export default function App() {
   const handleCancelSos = async () => {
     if (!currentCircle) return;
     const memberDocId = `${currentCircle.id}_${deviceId}`;
+    const userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat || 19.0760;
+    const userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng || 72.8777;
 
     if (!isDemoMode) {
       try {
-        await setDoc(doc(db, 'devices', memberDocId), { isSosActive: false }, { merge: true });
-        await setDoc(doc(db, 'grids', currentCircle.id), { activeSos: null }, { merge: true });
+        await setDoc(doc(db, 'devices', memberDocId), { 
+          name: memberName || 'Family Member',
+          lastLat: userLat,
+          lastLng: userLng,
+          lastUpdated: serverTimestamp(),
+          gridId: currentCircle.id,
+          isSosActive: false 
+        }, { merge: true });
       } catch {}
     } else {
       setMembers(prev =>
@@ -1356,8 +1433,15 @@ export default function App() {
   const handleResolveSos = async (targetMemberDocId: string) => {
     try {
       if (!isDemoMode && currentCircle) {
-        await setDoc(doc(db, 'devices', targetMemberDocId), { isSosActive: false }, { merge: true });
-        await setDoc(doc(db, 'grids', currentCircle.id), { activeSos: null }, { merge: true });
+        const targetMember = members.find(m => m.id === targetMemberDocId);
+        await setDoc(doc(db, 'devices', targetMemberDocId), { 
+          name: targetMember?.name || 'Family Member',
+          lastLat: targetMember?.lastLat || 19.0760,
+          lastLng: targetMember?.lastLng || 72.8777,
+          lastUpdated: serverTimestamp(),
+          gridId: currentCircle.id,
+          isSosActive: false 
+        }, { merge: true });
       } else {
         setMembers(prev =>
           prev.map(m => m.id === targetMemberDocId || m.id === 'demo-you' ? { ...m, isSosActive: false } : m)
@@ -1421,45 +1505,71 @@ export default function App() {
   // Check-In handler
   const handleSendCheckIn = async (message: string) => {
     if (!currentCircle) return;
+    const cleanMsg = (message || '').trim();
+    if (!cleanMsg) return;
+
     const memberDocId = `${currentCircle.id}_${deviceId}`;
-    const checkInId = `chk_${Date.now()}`;
-    const sender = memberName || 'Member';
+    const checkInId = `chk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const sender = memberName || 'Family Member';
+    const avatar = memberAvatar || '👤';
 
     const newCheckIn: CheckInPing = {
       id: checkInId,
       deviceId: memberDocId,
       memberName: sender,
-      avatar: memberAvatar,
-      message,
+      avatar,
+      message: cleanMsg,
       timestamp: new Date().toISOString()
     };
 
-    // Optimistic UI update so it appears instantly
-    const updatedFeed = [newCheckIn, ...checkIns.filter(c => c.id !== checkInId)].slice(0, 30);
-    setCheckIns(updatedFeed);
-    try {
-      localStorage.setItem('nexus_cached_checkins', JSON.stringify(updatedFeed));
-    } catch {}
+    if (currentCoords) {
+      newCheckIn.lat = currentCoords.lat;
+      newCheckIn.lng = currentCoords.lng;
+    }
+    if (currentPlace?.name) {
+      newCheckIn.place = currentPlace.name;
+    }
 
-    // Notification broadcast
-    notificationManager.showImportantNotification(`💬 ${sender} Check-in`, message);
+    const sanitizedNew = sanitizeCheckIn(newCheckIn);
+
+    // Keep up to 20 past check-ins from this member
+    const myExistingCheckIns = (checkIns || []).filter(c => c.deviceId === memberDocId && c.id !== checkInId);
+    const updatedMemberFeed = [sanitizedNew, ...myExistingCheckIns].slice(0, 20);
+
+    // Optimistically update full circle feed state
+    setCheckIns(prev => {
+      const merged = [sanitizedNew, ...prev.filter(c => c.id !== checkInId)].slice(0, 40);
+      try { localStorage.setItem('nexus_cached_checkins', JSON.stringify(merged)); } catch {}
+      return merged;
+    });
+
+    // Mark as seen so sender isn't alerted for their own post
+    seenAlertedCheckInIds.current.add(checkInId);
+
+    // Notification visual feedback on sender device
+    notificationManager.showImportantNotification(`💬 ${sender} (You)`, cleanMsg);
 
     if (!isDemoMode) {
       try {
-        // Save directly to circle document (instant sync to all family members)
-        await setDoc(doc(db, 'grids', currentCircle.id), {
-          feed: updatedFeed
-        }, { merge: true });
+        const userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat || 19.0760;
+        const userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng || 72.8777;
 
-        // Also save to subcollection
-        try {
-          await setDoc(doc(db, 'grids', currentCircle.id, 'checkins', checkInId), {
-            ...newCheckIn,
-            timestamp: serverTimestamp()
-          }, { merge: true });
-        } catch {}
+        // Save directly to devices collection (100% permitted by security rules)
+        await setDoc(doc(db, 'devices', memberDocId), {
+          id: memberDocId,
+          name: sender,
+          role: memberRole,
+          avatar,
+          lastLat: userLat,
+          lastLng: userLng,
+          lastUpdated: serverTimestamp(),
+          gridId: currentCircle.id,
+          status: 'approved',
+          latestCheckIn: sanitizedNew,
+          recentCheckIns: updatedMemberFeed
+        }, { merge: true });
       } catch (err) {
-        console.warn('Failed to save checkin to Firestore:', err);
+        console.error('Failed to sync check-in to Firestore devices:', err);
       }
     }
     setShowCheckInModal(false);
@@ -1526,15 +1636,17 @@ export default function App() {
   // Real-time Emergency SOS Audio Siren & Status Bar Notification Effect
   useEffect(() => {
     if (activeSosMember) {
-      // If not dismissed locally, open modal
-      if (dismissedSosMemberId !== activeSosMember.id) {
+      const isDismissed = dismissedSosMemberId === activeSosMember.id;
+      if (!isDismissed) {
         setShowSosModal(true);
-      }
-
-      // Play emergency siren if not muted
-      if (!isSirenMuted) {
-        sirenAudio.start();
+        // Play emergency siren if not muted
+        if (!isSirenMuted) {
+          sirenAudio.start();
+        } else {
+          sirenAudio.stop();
+        }
       } else {
+        // User dismissed the alert screen, keep siren silent!
         sirenAudio.stop();
       }
 
@@ -1554,7 +1666,7 @@ export default function App() {
       setIsSirenMuted(false);
       notificationManager.clearSosNotification();
     }
-  }, [activeSosMember, isSirenMuted, dismissedSosMemberId]);
+  }, [activeSosMember?.id, activeSosMember?.name, activeSosMember?.currentPlace, isSirenMuted, dismissedSosMemberId]);
 
   if (!currentCircle) {
     return (

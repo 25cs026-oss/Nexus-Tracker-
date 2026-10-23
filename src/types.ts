@@ -31,6 +31,8 @@ export interface DeviceMember {
   isSharingPaused?: boolean;
   status?: 'pending' | 'approved' | 'declined';
   isApproved?: boolean;
+  latestCheckIn?: CheckInPing;
+  recentCheckIns?: CheckInPing[];
 }
 
 export interface SafeZone {

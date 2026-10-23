@@ -185,6 +185,34 @@ export class SirenAudioEngine {
   public get active(): boolean {
     return this.isPlaying;
   }
+
+  /**
+   * Plays a pleasant 2-tone melodic notification chime for incoming family check-ins
+   */
+  public playChime() {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1); // A5
+      gain.gain.setValueAtTime(0.25, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.5);
+      setTimeout(() => {
+        if (ctx.state !== 'closed') ctx.close().catch(() => {});
+      }, 600);
+    } catch {}
+  }
 }
 
 export const sirenAudio = new SirenAudioEngine();

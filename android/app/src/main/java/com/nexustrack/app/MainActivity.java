@@ -2,6 +2,7 @@ package com.nexustrack.app;
 
 import android.Manifest;
 import android.app.Notification;
+import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
@@ -276,6 +277,9 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
+        // Ensure Android notification channels are created immediately
+        createNotificationChannels();
+
         // Request runtime permissions for 24/7 background tracking & notifications
         requestRequiredPermissions();
 
@@ -369,6 +373,34 @@ public class MainActivity extends AppCompatActivity {
         if (lower.endsWith(".woff")) return "font/woff";
         if (lower.endsWith(".ttf")) return "font/ttf";
         return "application/octet-stream";
+    }
+
+    private void createNotificationChannels() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    "nexus_tracker_channel",
+                    "Nexus Family Tracker",
+                    NotificationManager.IMPORTANCE_DEFAULT
+            );
+            channel.setDescription("Family location sharing and check-in updates");
+            channel.setShowBadge(true);
+
+            NotificationChannel emergencyChannel = new NotificationChannel(
+                    "nexus_emergency_channel",
+                    "Nexus Emergency SOS Alerts",
+                    NotificationManager.IMPORTANCE_HIGH
+            );
+            emergencyChannel.setDescription("High urgency SOS emergency family alerts");
+            emergencyChannel.enableVibration(true);
+            emergencyChannel.setVibrationPattern(new long[]{0, 500, 200, 500, 200, 500, 200, 800});
+            emergencyChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+                manager.createNotificationChannel(emergencyChannel);
+            }
+        }
     }
 
     private void requestRequiredPermissions() {
