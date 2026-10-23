@@ -5,10 +5,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.webkit.ConsoleMessage;
 import android.webkit.GeolocationPermissions;
@@ -26,8 +30,12 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -37,19 +45,27 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String TAG = "NexusMainActivity";
     private static final int PERMISSION_REQ_CODE = 4001;
-    private static final String APP_HOST = "localhost";
-    private static final String APP_ORIGIN = "https://" + APP_HOST;
+
+    // Local in-memory offline fallback
+    private static final String LOCAL_ORIGIN = "https://localhost";
+    private static final String LOCAL_INDEX = LOCAL_ORIGIN + "/index.html";
+
+    // Remote URL config on GitHub for instant OTA updates without rebuilding APK
+    private static final String REMOTE_CONFIG_URL = "https://raw.githubusercontent.com/25cs026-oss/Nexus-Tracker-/main/app-url.txt";
+    private static final String PREF_KEY_CLOUD_URL = "active_cloud_url";
 
     private WebView webView;
+    private SharedPreferences prefs;
+    private boolean hasFallenBackToLocal = false;
 
     public class NexusNativeBridge {
         @JavascriptInterface
         public String getNativeLocation() {
             try {
-                SharedPreferences prefs = getSharedPreferences("nexus_native_loc", Context.MODE_PRIVATE);
-                String lat = prefs.getString("lat", "0");
-                String lng = prefs.getString("lng", "0");
-                long time = prefs.getLong("time", 0);
+                SharedPreferences locPrefs = getSharedPreferences("nexus_native_loc", Context.MODE_PRIVATE);
+                String lat = locPrefs.getString("lat", "0");
+                String lng = locPrefs.getString("lng", "0");
+                long time = locPrefs.getLong("time", 0);
                 return "{\"lat\":" + lat + ",\"lng\":" + lng + ",\"time\":" + time + "}";
             } catch (Exception e) {
                 return "{}";
@@ -60,6 +76,16 @@ public class MainActivity extends AppCompatActivity {
         public boolean isNative() {
             return true;
         }
+
+        @JavascriptInterface
+        public void setCloudUrl(String newUrl) {
+            if (newUrl != null && !newUrl.trim().isEmpty()) {
+                prefs.edit().putString(PREF_KEY_CLOUD_URL, newUrl.trim()).apply();
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (webView != null) webView.loadUrl(newUrl.trim());
+                });
+            }
+        }
     }
 
     @Override
@@ -67,6 +93,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        prefs = getSharedPreferences("nexus_app_config", Context.MODE_PRIVATE);
         webView = findViewById(R.id.web);
 
         WebSettings settings = webView.getSettings();
@@ -104,7 +131,7 @@ public class MainActivity extends AppCompatActivity {
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 String host = uri.getHost();
-                if (host != null && (APP_HOST.equalsIgnoreCase(host) || "appassets.androidplatform.net".equalsIgnoreCase(host))) {
+                if (host != null && ("localhost".equalsIgnoreCase(host) || "appassets.androidplatform.net".equalsIgnoreCase(host))) {
                     String path = uri.getPath();
                     if (path == null || path.isEmpty() || "/".equals(path)) {
                         path = "/index.html";
@@ -123,7 +150,6 @@ public class MainActivity extends AppCompatActivity {
                         headers.put("Access-Control-Allow-Headers", "*");
                         return new WebResourceResponse(mimeType, "UTF-8", 200, "OK", headers, is);
                     } catch (IOException e) {
-                        // Fallback to index.html for SPA router requests
                         try {
                             InputStream is = getAssets().open("public/index.html");
                             Map<String, String> headers = new HashMap<>();
@@ -137,15 +163,17 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
-                // Ignore self-signed / localhost SSL error
                 handler.proceed();
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 super.onReceivedError(view, request, error);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    Log.e(TAG, "WebView error: " + error.getErrorCode() + " - " + error.getDescription() + " for " + request.getUrl());
+                // If main page failed to load from cloud (offline / network error), fall back to offline local assets
+                if (request.isForMainFrame() && !hasFallenBackToLocal) {
+                    hasFallenBackToLocal = true;
+                    Log.w(TAG, "Cloud URL unreachable, falling back to bundled offline assets");
+                    new Handler(Looper.getMainLooper()).post(() -> webView.loadUrl(LOCAL_INDEX));
                 }
             }
         });
@@ -156,8 +184,73 @@ public class MainActivity extends AppCompatActivity {
         // Start native sticky Foreground Service for 24/7 background GPS tracking
         startNativeLocationService();
 
-        // Load app via secure localhost origin intercepted from assets
-        webView.loadUrl(APP_ORIGIN + "/index.html");
+        // Determine whether to load live cloud URL or local offline bundle
+        loadApp();
+
+        // Check for live cloud URL updates from GitHub in the background
+        fetchRemoteConfigAsync();
+    }
+
+    private void loadApp() {
+        String cloudUrl = prefs.getString(PREF_KEY_CLOUD_URL, "").trim();
+        if (!cloudUrl.isEmpty() && isNetworkAvailable()) {
+            hasFallenBackToLocal = false;
+            Log.d(TAG, "Loading live cloud URL: " + cloudUrl);
+            webView.loadUrl(cloudUrl);
+        } else {
+            hasFallenBackToLocal = true;
+            Log.d(TAG, "Loading offline bundled assets");
+            webView.loadUrl(LOCAL_INDEX);
+        }
+    }
+
+    private void fetchRemoteConfigAsync() {
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            try {
+                URL url = new URL(REMOTE_CONFIG_URL);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(4000);
+                conn.setReadTimeout(4000);
+                conn.setRequestMethod("GET");
+
+                if (conn.getResponseCode() == 200) {
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                    String line = reader.readLine();
+                    reader.close();
+
+                    if (line != null) {
+                        String fetchedUrl = line.trim();
+                        String currentUrl = prefs.getString(PREF_KEY_CLOUD_URL, "").trim();
+
+                        if (fetchedUrl.startsWith("http") && !fetchedUrl.equals(currentUrl)) {
+                            Log.d(TAG, "Discovered updated cloud URL from GitHub: " + fetchedUrl);
+                            prefs.edit().putString(PREF_KEY_CLOUD_URL, fetchedUrl).apply();
+
+                            new Handler(Looper.getMainLooper()).post(() -> {
+                                hasFallenBackToLocal = false;
+                                if (webView != null) webView.loadUrl(fetchedUrl);
+                            });
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.d(TAG, "Remote config check skipped (offline or not reachable): " + e.getMessage());
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }).start();
+    }
+
+    private boolean isNetworkAvailable() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                NetworkInfo netInfo = cm.getActiveNetworkInfo();
+                return netInfo != null && netInfo.isConnected();
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     private String getMimeType(String path) {
@@ -241,7 +334,6 @@ public class MainActivity extends AppCompatActivity {
         if (webView != null && webView.canGoBack()) {
             webView.goBack();
         } else {
-            // Minimize to background instead of destroying activity
             moveTaskToBack(true);
         }
     }
