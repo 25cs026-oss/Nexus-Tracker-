@@ -712,11 +712,19 @@ export default function App() {
     if (!currentCircle || isDemoMode) return;
 
     // Circle listener
+    const memberDocId = `${currentCircle.id}_${deviceId}`;
     const circleDocRef = doc(db, 'grids', currentCircle.id);
     const unsubCircle = onSnapshot(circleDocRef, (snap) => {
       if (snap.exists()) {
-        const data = snap.data() as GridCircle;
+        const data = snap.data() as any;
         if (data.safeZones) setSafeZones(data.safeZones);
+
+        // Immediate Circle-Level SOS Broadcast Detection
+        if (data.activeSos && data.activeSos.memberId !== memberDocId) {
+          notificationManager.showSosAlertNotification(data.activeSos.memberName, data.activeSos.place);
+          sirenAudio.start();
+          setShowSosModal(true);
+        }
       }
     }, () => {});
 
@@ -802,16 +810,24 @@ export default function App() {
       });
     }, () => {});
 
-    // Check-ins listener
-    const checkInsQuery = query(
-      collection(db, `grids/${currentCircle.id}/checkins`),
-      orderBy('timestamp', 'desc'),
-      limit(20)
-    );
-    const unsubCheckIns = onSnapshot(checkInsQuery, (snap) => {
+    // Check-ins listener (no compound index required, sort client-side)
+    const checkInsCol = collection(db, 'grids', currentCircle.id, 'checkins');
+    const unsubCheckIns = onSnapshot(checkInsCol, (snap) => {
       const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as CheckInPing));
-      setCheckIns(list);
-    }, () => {});
+      list.sort((a, b) => {
+        const tA = (a.timestamp as any)?.toMillis ? (a.timestamp as any).toMillis() : new Date(a.timestamp || 0).getTime();
+        const tB = (b.timestamp as any)?.toMillis ? (b.timestamp as any).toMillis() : new Date(b.timestamp || 0).getTime();
+        return tB - tA;
+      });
+      if (list.length > 0) {
+        setCheckIns(list);
+        try {
+          localStorage.setItem('nexus_cached_checkins', JSON.stringify(list.slice(0, 30)));
+        } catch {}
+      }
+    }, (err) => {
+      console.warn('Checkins snapshot warning:', err);
+    });
 
     return () => {
       unsubCircle();
@@ -1231,14 +1247,28 @@ export default function App() {
   const handleTriggerSos = async () => {
     if (!currentCircle) return;
     const memberDocId = `${currentCircle.id}_${deviceId}`;
+    const myName = memberName || 'Family Member';
+    const placeName = currentPlace?.name || '';
 
     if (!isDemoMode) {
       try {
-        await updateDoc(doc(db, 'devices', memberDocId), {
+        await setDoc(doc(db, 'devices', memberDocId), {
           isSosActive: true,
           sosTimestamp: serverTimestamp()
-        });
-      } catch {}
+        }, { merge: true });
+
+        // Circle-level high-visibility SOS broadcast
+        await setDoc(doc(db, 'grids', currentCircle.id), {
+          activeSos: {
+            memberId: memberDocId,
+            memberName: myName,
+            place: placeName,
+            timestamp: new Date().toISOString()
+          }
+        }, { merge: true });
+      } catch (err) {
+        console.warn('Failed to broadcast SOS to Firestore:', err);
+      }
     } else {
       setMembers(prev =>
         prev.map(m => m.id === memberDocId || m.id === 'demo-you' ? { ...m, isSosActive: true } : m)
@@ -1247,6 +1277,7 @@ export default function App() {
     setDismissedSosMemberId(null);
     setIsSirenMuted(false);
     sirenAudio.start();
+    notificationManager.showSosAlertNotification(myName, placeName);
     setShowSosModal(true);
   };
 
@@ -1256,7 +1287,8 @@ export default function App() {
 
     if (!isDemoMode) {
       try {
-        await updateDoc(doc(db, 'devices', memberDocId), { isSosActive: false });
+        await setDoc(doc(db, 'devices', memberDocId), { isSosActive: false }, { merge: true });
+        await setDoc(doc(db, 'grids', currentCircle.id), { activeSos: null }, { merge: true });
       } catch {}
     } else {
       setMembers(prev =>
@@ -1270,13 +1302,14 @@ export default function App() {
   };
 
   // Any member or host can mark an emergency SOS as resolved/safe
-  const handleResolveSos = async (memberDocId: string) => {
+  const handleResolveSos = async (targetMemberDocId: string) => {
     try {
       if (!isDemoMode && currentCircle) {
-        await updateDoc(doc(db, 'devices', memberDocId), { isSosActive: false });
+        await setDoc(doc(db, 'devices', targetMemberDocId), { isSosActive: false }, { merge: true });
+        await setDoc(doc(db, 'grids', currentCircle.id), { activeSos: null }, { merge: true });
       } else {
         setMembers(prev =>
-          prev.map(m => m.id === memberDocId || m.id === 'demo-you' ? { ...m, isSosActive: false } : m)
+          prev.map(m => m.id === targetMemberDocId || m.id === 'demo-you' ? { ...m, isSosActive: false } : m)
         );
       }
       sirenAudio.stop();
@@ -1338,22 +1371,33 @@ export default function App() {
   const handleSendCheckIn = async (message: string) => {
     if (!currentCircle) return;
     const memberDocId = `${currentCircle.id}_${deviceId}`;
+    const checkInId = `chk_${Date.now()}`;
+    const sender = memberName || 'Member';
 
     const newCheckIn: CheckInPing = {
-      id: `chk_${Date.now()}`,
+      id: checkInId,
       deviceId: memberDocId,
-      memberName: memberName || 'Member',
+      memberName: sender,
       avatar: memberAvatar,
       message,
-      timestamp: isDemoMode ? new Date() : serverTimestamp()
+      timestamp: new Date().toISOString()
     };
+
+    // Optimistic UI update so it appears instantly
+    setCheckIns(prev => [newCheckIn, ...prev.filter(c => c.id !== checkInId)]);
+
+    // Notification broadcast
+    notificationManager.showImportantNotification(`💬 ${sender} Check-in`, message);
 
     if (!isDemoMode) {
       try {
-        await addDoc(collection(db, `grids/${currentCircle.id}/checkins`), newCheckIn);
-      } catch {}
-    } else {
-      setCheckIns(prev => [newCheckIn, ...prev]);
+        await setDoc(doc(db, 'grids', currentCircle.id, 'checkins', checkInId), {
+          ...newCheckIn,
+          timestamp: serverTimestamp()
+        }, { merge: true });
+      } catch (err) {
+        console.warn('Failed to save checkin to Firestore:', err);
+      }
     }
     setShowCheckInModal(false);
   };
@@ -2059,21 +2103,89 @@ export default function App() {
                 )}
 
                 {mobileTab === 'checkins' && (
-                  <div className="space-y-2.5">
-                    <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
-                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">Family Updates</span>
+                  <div className="space-y-3">
+                    {/* Emergency SOS Banner in Feed */}
+                    {activeSosMember && (
+                      <div className="p-3 bg-rose-500/15 border-2 border-rose-500/40 rounded-2xl flex items-center justify-between gap-2 text-rose-600 dark:text-rose-400 animate-pulse">
+                        <div className="flex items-center gap-2">
+                          <ShieldAlert className="w-5 h-5 shrink-0 text-rose-600" />
+                          <div>
+                            <div className="text-xs font-black">🚨 EMERGENCY SOS ACTIVE</div>
+                            <div className="text-[11px] text-slate-700 dark:text-slate-300">
+                              {activeSosMember.name} needs help {activeSosMember.currentPlace ? `near ${activeSosMember.currentPlace}` : ''}!
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setSelectedMember(activeSosMember);
+                            setShowSosModal(true);
+                          }}
+                          className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shrink-0"
+                        >
+                          View
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Live Circle Members Summary */}
+                    <div className="p-3 bg-slate-50 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 rounded-2xl">
+                      <div className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 flex items-center justify-between">
+                        <span>Live Family Status</span>
+                        <span className="text-[10px] text-slate-400 font-normal">{members.length} member{members.length > 1 ? 's' : ''}</span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {members.map(m => (
+                          <div key={m.id} className="p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2 text-xs">
+                            <div className="flex items-center gap-2 truncate">
+                              <span className="text-sm">{m.avatar || '👤'}</span>
+                              <span className="font-bold text-slate-800 dark:text-slate-100 truncate">{m.name}</span>
+                              <span className="text-[11px] text-slate-500 truncate">
+                                {m.currentPlace ? `🏡 ${m.currentPlace}` : (m.speed && m.speed > 3 ? `🚗 Moving (${Math.round(m.speed)} km/h)` : '🟢 Stationary')}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0 text-[10px] text-slate-400">
+                              {m.battery !== undefined && (
+                                <span className={m.battery <= 20 ? 'text-rose-500 font-bold' : ''}>
+                                  {m.battery <= 20 ? '🪫' : '🔋'}{m.battery}%
+                                </span>
+                              )}
+                              <span>•</span>
+                              <span>{formatRelativeTime(m.lastUpdated)}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Family Updates & Check-ins */}
+                    <div className="flex items-center justify-between pb-1.5 border-b border-slate-100 dark:border-slate-800">
+                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">Family Updates & Check-ins</span>
                       <button
                         onClick={() => setShowCheckInModal(true)}
-                        className="px-3 py-1 bg-indigo-600 text-white rounded-xl text-xs font-semibold flex items-center gap-1"
+                        className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1 shadow-xs"
                       >
                         <Plus className="w-3.5 h-3.5" />
                         <span>Post</span>
                       </button>
                     </div>
 
+                    {/* Quick 1-Tap Presets */}
+                    <div className="flex gap-1.5 overflow-x-auto pb-1 text-[11px]">
+                      {['🏡 Arrived Home', '🚗 Heading out', '👍 All good', '🪫 Low battery'].map((msg, i) => (
+                        <button
+                          key={i}
+                          onClick={() => handleSendCheckIn(msg)}
+                          className="px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-slate-700 dark:text-slate-300 whitespace-nowrap transition-colors"
+                        >
+                          {msg}
+                        </button>
+                      ))}
+                    </div>
+
                     {checkIns.length === 0 ? (
-                      <div className="text-center py-8 text-xs text-slate-400">
-                        No recent check-in updates. Tap "Post" to send an update!
+                      <div className="text-center py-6 text-xs text-slate-400">
+                        No custom check-ins yet. Tap any preset above or "Post" to share an update!
                       </div>
                     ) : (
                       checkIns.map((item) => (
@@ -2081,7 +2193,7 @@ export default function App() {
                           key={item.id}
                           className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 flex items-start gap-3"
                         >
-                          <span className="text-xl p-1 bg-white dark:bg-slate-800 rounded-xl">
+                          <span className="text-xl p-1 bg-white dark:bg-slate-800 rounded-xl shadow-xs">
                             {item.avatar || '👤'}
                           </span>
                           <div className="flex-1 min-w-0">
@@ -2700,10 +2812,77 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="flex-1 overflow-y-auto mt-3 space-y-2.5 pr-1">
+              <div className="flex-1 overflow-y-auto mt-3 space-y-3 pr-1">
+                {/* Emergency SOS Banner in Feed */}
+                {activeSosMember && (
+                  <div className="p-3 bg-rose-500/15 border-2 border-rose-500/40 rounded-2xl flex items-center justify-between gap-2 text-rose-600 dark:text-rose-400 animate-pulse">
+                    <div className="flex items-center gap-2">
+                      <ShieldAlert className="w-5 h-5 shrink-0 text-rose-600" />
+                      <div>
+                        <div className="text-xs font-black">🚨 EMERGENCY SOS ACTIVE</div>
+                        <div className="text-[11px] text-slate-700 dark:text-slate-300">
+                          {activeSosMember.name} needs help {activeSosMember.currentPlace ? `near ${activeSosMember.currentPlace}` : ''}!
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setSelectedMember(activeSosMember);
+                        setShowSosModal(true);
+                      }}
+                      className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shrink-0"
+                    >
+                      View
+                    </button>
+                  </div>
+                )}
+
+                {/* Live Circle Members Summary */}
+                <div className="p-3 bg-slate-50 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 rounded-2xl">
+                  <div className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 flex items-center justify-between">
+                    <span>Live Family Status</span>
+                    <span className="text-[10px] text-slate-400 font-normal">{members.length} member{members.length > 1 ? 's' : ''}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {members.map(m => (
+                      <div key={m.id} className="p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2 text-xs">
+                        <div className="flex items-center gap-2 truncate">
+                          <span className="text-sm">{m.avatar || '👤'}</span>
+                          <span className="font-bold text-slate-800 dark:text-slate-100 truncate">{m.name}</span>
+                          <span className="text-[11px] text-slate-500 truncate">
+                            {m.currentPlace ? `🏡 ${m.currentPlace}` : (m.speed && m.speed > 3 ? `🚗 Moving (${Math.round(m.speed)} km/h)` : '🟢 Stationary')}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0 text-[10px] text-slate-400">
+                          {m.battery !== undefined && (
+                            <span className={m.battery <= 20 ? 'text-rose-500 font-bold' : ''}>
+                              {m.battery <= 20 ? '🪫' : '🔋'}{m.battery}%
+                            </span>
+                          )}
+                          <span>•</span>
+                          <span>{formatRelativeTime(m.lastUpdated)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Quick 1-Tap Presets */}
+                <div className="flex gap-1.5 overflow-x-auto pb-1 text-[11px]">
+                  {['🏡 Arrived Home', '🚗 Heading out', '👍 All good', '🪫 Low battery'].map((msg, i) => (
+                    <button
+                      key={i}
+                      onClick={() => handleSendCheckIn(msg)}
+                      className="px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-slate-700 dark:text-slate-300 whitespace-nowrap transition-colors"
+                    >
+                      {msg}
+                    </button>
+                  ))}
+                </div>
+
                 {checkIns.length === 0 ? (
-                  <div className="text-center py-8 text-xs text-slate-400">
-                    No recent check-in updates. Tap "Post" to send an update!
+                  <div className="text-center py-6 text-xs text-slate-400">
+                    No custom check-in messages yet. Tap any preset above or "Post" to share an update!
                   </div>
                 ) : (
                   checkIns.map((item) => (

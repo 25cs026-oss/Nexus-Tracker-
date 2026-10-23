@@ -1,10 +1,14 @@
 package com.nexustrack.app;
 
 import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.media.RingtoneManager;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.net.Uri;
@@ -13,7 +17,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
+import androidx.core.app.NotificationCompat;
 import android.webkit.ConsoleMessage;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
@@ -88,6 +94,95 @@ public class MainActivity extends AppCompatActivity {
                     if (webView != null) webView.loadUrl(newUrl.trim());
                 });
             }
+        }
+
+        @JavascriptInterface
+        public void triggerNativeSosAlert(String senderName, String placeName) {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                    if (pm != null) {
+                        PowerManager.WakeLock screenLock = pm.newWakeLock(
+                                PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                                "NexusTracker:EmergencySosWake"
+                        );
+                        screenLock.acquire(15000L);
+                    }
+
+                    Uri alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
+                    if (alarmSound == null) {
+                        alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+                    }
+
+                    Intent intent = new Intent(MainActivity.this, MainActivity.class);
+                    intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    PendingIntent pendingIntent = PendingIntent.getActivity(
+                            MainActivity.this, 0, intent,
+                            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                    );
+
+                    Notification notification = new NotificationCompat.Builder(MainActivity.this, "nexus_emergency_channel")
+                            .setContentTitle("🚨 EMERGENCY SOS: " + (senderName != null ? senderName : "Family Member") + " Needs Help!")
+                            .setContentText(placeName != null && !placeName.isEmpty() ? "Near " + placeName : "Broadcasting live emergency location! Tap to view.")
+                            .setSmallIcon(android.R.drawable.stat_sys_warning)
+                            .setPriority(NotificationCompat.PRIORITY_MAX)
+                            .setCategory(NotificationCompat.CATEGORY_ALARM)
+                            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                            .setSound(alarmSound)
+                            .setVibrate(new long[]{0, 800, 300, 800, 300, 1200})
+                            .setContentIntent(pendingIntent)
+                            .setAutoCancel(false)
+                            .setOngoing(true)
+                            .build();
+
+                    NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                    if (nm != null) {
+                        nm.notify(9999, notification);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Error in triggerNativeSosAlert: " + e.getMessage());
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void clearNativeSosAlert() {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                    if (nm != null) {
+                        nm.cancel(9999);
+                    }
+                } catch (Exception ignored) {}
+            });
+        }
+
+        @JavascriptInterface
+        public void showNativeNotification(String title, String body) {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    Intent intent = new Intent(MainActivity.this, MainActivity.class);
+                    intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                    PendingIntent pendingIntent = PendingIntent.getActivity(
+                            MainActivity.this, 0, intent,
+                            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                    );
+
+                    Notification notification = new NotificationCompat.Builder(MainActivity.this, "nexus_tracker_channel")
+                            .setContentTitle(title)
+                            .setContentText(body)
+                            .setSmallIcon(android.R.drawable.ic_dialog_info)
+                            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                            .setContentIntent(pendingIntent)
+                            .setAutoCancel(true)
+                            .build();
+
+                    NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                    if (nm != null) {
+                        nm.notify((int) System.currentTimeMillis(), notification);
+                    }
+                } catch (Exception ignored) {}
+            });
         }
     }
 
