@@ -88,6 +88,7 @@ export class CommsManager {
   private isRemoteSpeaking: boolean = false;
   private permissionWarning: string | null = null;
   private handledCallTimestamps: Set<number> = new Set();
+  private pttAutoTimeout: any = null;
 
   // Audio elements for playback
   private remoteAudioElement: HTMLAudioElement | null = null;
@@ -734,12 +735,16 @@ export class CommsManager {
     radioAudio.playPttStartChirp();
     this.pttRecordedChunks = [];
 
+    // Auto-timeout after 20s if user forgot to click/release
+    if (this.pttAutoTimeout) clearTimeout(this.pttAutoTimeout);
+    this.pttAutoTimeout = setTimeout(() => {
+      if (this.isPttPressed) {
+        this.releasePtt();
+      }
+    }, 20000);
+
     try {
       const stream = await this.getLocalMedia(false);
-      if (!this.isPttPressed) {
-        stream.getAudioTracks().forEach(t => { t.enabled = false; });
-        return;
-      }
       stream.getAudioTracks().forEach(t => { t.enabled = true; });
 
       // Start MediaRecorder for voice burst delivery
@@ -766,8 +771,17 @@ export class CommsManager {
         }
       }
 
+      // Check if user already released while media was being acquired
+      if (!this.isPttPressed) {
+        setTimeout(() => {
+          this.finishAndSendRecording();
+        }, 350);
+        return;
+      }
+
       // Signal target peers about PTT transmission starting
-      const targets = this.session?.targetMember
+      const isDirect = Boolean(this.session?.targetMember && !this.session.isBroadcasting);
+      const targets = isDirect && this.session?.targetMember
         ? [this.session.targetMember]
         : this.membersList.filter(m => m.id !== this.currentMember?.id);
 
@@ -810,11 +824,20 @@ export class CommsManager {
     this.notify();
     radioAudio.playRogerBeep();
 
-    if (this.localStream) {
-      this.localStream.getAudioTracks().forEach(t => { t.enabled = false; });
+    if (this.pttAutoTimeout) {
+      clearTimeout(this.pttAutoTimeout);
+      this.pttAutoTimeout = null;
     }
 
-    const targets = this.session?.targetMember
+    this.finishAndSendRecording();
+  }
+
+  private finishAndSendRecording() {
+    // Default to ALL circle members unless explicit 1-on-1 private whisper is active
+    const isDirect = Boolean(this.session?.targetMember && !this.session.isBroadcasting);
+    const targetMemberId = isDirect && this.session?.targetMember?.id ? this.session.targetMember.id : 'all';
+
+    const targets = isDirect && this.session?.targetMember
       ? [this.session.targetMember]
       : this.membersList.filter(m => m.id !== this.currentMember?.id);
 
@@ -822,7 +845,18 @@ export class CommsManager {
     if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
       try {
         const mime = this.mediaRecorder.mimeType || 'audio/webm';
+
+        try {
+          if (this.mediaRecorder.state === 'recording') {
+            this.mediaRecorder.requestData();
+          }
+        } catch {}
+
         this.mediaRecorder.onstop = () => {
+          if (this.localStream) {
+            this.localStream.getAudioTracks().forEach(t => { t.enabled = false; });
+          }
+
           if (this.pttRecordedChunks.length > 0) {
             const audioBlob = new Blob(this.pttRecordedChunks, { type: mime });
             const reader = new FileReader();
@@ -838,7 +872,7 @@ export class CommsManager {
                   });
                 });
 
-                // 2. Transmit over Firestore signal bridge as guaranteed backup!
+                // 2. Transmit over Firestore signal bridge as guaranteed broadcast to ALL members!
                 if (this.signalBridge && this.currentMember) {
                   this.signalBridge({
                     radioBurst: {
@@ -846,7 +880,7 @@ export class CommsManager {
                       senderName: this.currentMember.name || 'Radio Unit',
                       audioData: base64Audio,
                       timestamp: Date.now(),
-                      targetMemberId: this.session?.targetMember?.id || 'all'
+                      targetMemberId
                     }
                   });
                 }
@@ -855,9 +889,17 @@ export class CommsManager {
             reader.readAsDataURL(audioBlob);
           }
         };
+
         this.mediaRecorder.stop();
       } catch (e) {
         console.warn('MediaRecorder stop note:', e);
+        if (this.localStream) {
+          this.localStream.getAudioTracks().forEach(t => { t.enabled = false; });
+        }
+      }
+    } else {
+      if (this.localStream) {
+        this.localStream.getAudioTracks().forEach(t => { t.enabled = false; });
       }
     }
 

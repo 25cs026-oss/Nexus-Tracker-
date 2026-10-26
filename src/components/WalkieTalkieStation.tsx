@@ -130,15 +130,20 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
       e.stopPropagation();
     } catch {}
 
-    if (isPointerDownRef.current) return;
-    isPointerDownRef.current = true;
-    pressStartTimeRef.current = Date.now();
+    radioAudio.resumeContext();
+    if (typeof window !== 'undefined' && (window as any).NexusNative?.ensureMediaPermissions) {
+      try { (window as any).NexusNative.ensureMediaPermissions(); } catch {}
+    }
 
     if (commsManager.isPttActive()) {
+      isPointerDownRef.current = false;
       handlePttEnd();
-    } else {
-      handlePttStart();
+      return;
     }
+
+    isPointerDownRef.current = true;
+    pressStartTimeRef.current = Date.now();
+    handlePttStart();
   };
 
   const handlePointerUpAction = (e: React.SyntheticEvent | Event) => {
@@ -148,11 +153,13 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
     } catch {}
 
     if (!isPointerDownRef.current) return;
-    isPointerDownRef.current = false;
-
     const duration = Date.now() - pressStartTimeRef.current;
-    if (duration >= 250) {
+
+    if (duration >= 350) {
+      isPointerDownRef.current = false;
       handlePttEnd();
+    } else {
+      isPointerDownRef.current = false;
     }
   };
 
@@ -290,10 +297,10 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
         >
           <Radio className={`w-11 h-11 mb-1.5 pointer-events-none ${isPttPressed ? 'animate-bounce' : ''}`} />
           <span className="font-black text-sm tracking-wider uppercase pointer-events-none">
-            {isPttPressed ? 'TRANSMITTING' : 'PUSH TO TALK'}
+            {isPttPressed ? 'LIVE TRANSMITTING' : 'PUSH TO TALK'}
           </span>
           <span className="text-[10px] text-blue-200 mt-0.5 pointer-events-none">
-            {isPttPressed ? 'Release or Tap to End' : 'Press & Hold or Tap to Talk'}
+            {isPttPressed ? 'Release or Click to Send' : 'Hold to Speak or Click to Start'}
           </span>
         </button>
 

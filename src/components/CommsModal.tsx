@@ -68,22 +68,20 @@ export const CommsModal: React.FC<CommsModalProps> = ({
       e.stopPropagation();
     } catch {}
 
-    if (isPttPointerDown.current) return;
-    isPttPointerDown.current = true;
-    pttPressStartTime.current = Date.now();
-
     radioAudio.resumeContext();
     if (typeof window !== 'undefined' && (window as any).NexusNative?.ensureMediaPermissions) {
       try { (window as any).NexusNative.ensureMediaPermissions(); } catch {}
     }
 
     if (commsManager.isPttActive()) {
-      // Toggle off if already talking
+      isPttPointerDown.current = false;
       commsManager.releasePtt();
-    } else {
-      // Start talking immediately on hold/press
-      commsManager.pressPtt();
+      return;
     }
+
+    isPttPointerDown.current = true;
+    pttPressStartTime.current = Date.now();
+    commsManager.pressPtt();
   };
 
   const handlePttUp = (e: React.SyntheticEvent | Event) => {
@@ -93,14 +91,14 @@ export const CommsModal: React.FC<CommsModalProps> = ({
     } catch {}
 
     if (!isPttPointerDown.current) return;
-    isPttPointerDown.current = false;
-
     const duration = Date.now() - pttPressStartTime.current;
-    if (duration >= 250) {
-      // User held the button down: stop talking on finger/pointer release
+
+    if (duration >= 350) {
+      isPttPointerDown.current = false;
       commsManager.releasePtt();
+    } else {
+      isPttPointerDown.current = false;
     }
-    // If duration < 250, it was a quick click/tap: keep transmitting (toggle mode) until next tap
   };
 
   // Global window release listener for safe PTT release even if pointer leaves button
@@ -561,6 +559,37 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                   </div>
                 </div>
 
+                {/* Channel Selector Chips */}
+                <div className="w-full mt-2.5 flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => commsManager.openRadio(undefined)}
+                    className={`px-3 py-1.5 rounded-xl border flex items-center gap-1.5 font-bold transition-all cursor-pointer whitespace-nowrap text-xs ${
+                      session.isBroadcasting || !session.targetMember
+                        ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
+                        : 'bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700'
+                    }`}
+                  >
+                    <Users className="w-3.5 h-3.5" />
+                    <span>All Circle Members ({members.length})</span>
+                  </button>
+                  {targetCandidates.map(m => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => commsManager.openRadio(m)}
+                      className={`px-3 py-1.5 rounded-xl border flex items-center gap-1.5 font-bold transition-all cursor-pointer whitespace-nowrap text-xs ${
+                        !session.isBroadcasting && session.targetMember?.id === m.id
+                          ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
+                          : 'bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      <span>{m.avatar || '👤'}</span>
+                      <span>{m.name}</span>
+                    </button>
+                  ))}
+                </div>
+
                 {/* Tactical Status & Wave Visualizer */}
                 <div className="my-8 flex flex-col items-center">
                   {remoteSpeaker?.isSpeaking ? (
@@ -632,10 +661,10 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                   >
                     <Radio className={`w-12 h-12 mb-2 pointer-events-none ${isPttPressed ? 'animate-bounce' : ''}`} />
                     <span className="font-extrabold text-sm sm:text-base tracking-wider uppercase pointer-events-none">
-                      {isPttPressed ? 'TRANSMITTING' : 'PUSH TO TALK'}
+                      {isPttPressed ? 'LIVE TRANSMITTING' : 'PUSH TO TALK'}
                     </span>
                     <span className="text-[10px] text-blue-200 mt-0.5 pointer-events-none">
-                      {isPttPressed ? 'Release or Tap to End' : 'Press & Hold or Tap to Talk'}
+                      {isPttPressed ? 'Release or Click to Send' : 'Hold to Speak or Click to Start'}
                     </span>
                   </button>
 

@@ -876,7 +876,16 @@ export default function App() {
           const ageMs = Date.now() - burstTime;
           if (ageMs < 25000 && !seenRadioBurstTimestamps.current.has(burstTime)) {
             seenRadioBurstTimestamps.current.add(burstTime);
-            if (!m.radioBurst.targetMemberId || m.radioBurst.targetMemberId === 'all' || m.radioBurst.targetMemberId === memberDocId) {
+            const target = m.radioBurst.targetMemberId;
+            const isForMe = !target || 
+                            target === 'all' || 
+                            target === memberDocId ||
+                            target === deviceId ||
+                            (typeof target === 'string' && (
+                              memberDocId.includes(target) || 
+                              target.includes(memberDocId)
+                            ));
+            if (isForMe) {
               commsManager.playRadioAudioBurst(m.radioBurst.audioData, m.radioBurst.senderName);
             }
           }
