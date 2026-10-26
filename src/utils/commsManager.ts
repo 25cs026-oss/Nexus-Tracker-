@@ -7,6 +7,7 @@
  * - Hardware Echo Cancellation, Noise Suppression & Auto Gain Control.
  * - Walkie-Talkie Push-to-Talk (PTT) with instant audio streaming and tactical roger beeps.
  * - HD Live Video Calling with front/back camera toggling and Picture-in-Picture (PIP).
+ * - 5-Stage Progressive Media Fallback: Guarantees calls NEVER cut even if camera is missing, busy, or blocked.
  * - Firestore Signaling Bridge: Ensures calls ring and notify even if PeerJS socket is sleeping.
  * - Automatic Peer ID Collision recovery and multiple redundant STUN servers.
  */
@@ -76,6 +77,7 @@ export class CommsManager {
   private isPttPressed: boolean = false;
   private remoteSpeakerName: string | null = null;
   private isRemoteSpeaking: boolean = false;
+  private permissionWarning: string | null = null;
 
   // Audio elements for playback
   private remoteAudioElement: HTMLAudioElement | null = null;
@@ -141,6 +143,10 @@ export class CommsManager {
 
   public getMyPeerId(): string | null {
     return this.myPeerId;
+  }
+
+  public getPermissionWarning(): string | null {
+    return this.permissionWarning;
   }
 
   public getRemoteSpeaker(): { name: string; isSpeaking: boolean } | null {
@@ -229,6 +235,27 @@ export class CommsManager {
     }
   }
 
+  public async ensurePeerOpen(): Promise<boolean> {
+    if (this.peer && this.peer.open) return true;
+    if (!this.peer && this.currentMember && this.circleId) {
+      this.createPeer(this.getPeerIdForMember(this.currentMember.id));
+    }
+    if (!this.peer) return false;
+
+    return new Promise<boolean>((resolve) => {
+      if (this.peer?.open) return resolve(true);
+      const timer = setTimeout(() => resolve(false), 4000);
+      this.peer?.once('open', () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+      this.peer?.once('error', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+  }
+
   public updateMembersList(members: DeviceMember[]) {
     this.membersList = members;
   }
@@ -289,7 +316,32 @@ export class CommsManager {
     const isVideo = meta.type === 'video';
 
     if (isVideo) {
-      // Tactical Video Call -> Trigger ringing banner
+      // 1. If WE are already calling this person (outgoing call in progress), auto-answer:
+      if (
+        this.session &&
+        (this.session.status === 'connecting' || this.session.status === 'connected') &&
+        this.session.targetMember &&
+        (this.session.targetMember.id === meta.callerId ||
+         this.session.targetMember.id.endsWith(meta.callerId || '') ||
+         meta.callerId?.endsWith(this.session.targetMember.id))
+      ) {
+        call.answer(this.localStream || undefined);
+        this.activeMediaConnection = call;
+        call.on('stream', (remoteMediaStream) => {
+          radioAudio.playCallConnected();
+          this.remoteStream = remoteMediaStream;
+          if (this.session) {
+            this.session.status = 'connected';
+          }
+          this.notify();
+        });
+        call.on('close', () => {
+          this.endCall();
+        });
+        return;
+      }
+
+      // 2. Normal incoming video call -> Trigger ringing banner
       radioAudio.startIncomingCallRingtone();
       this.incomingCall = {
         callId: call.peer,
@@ -308,7 +360,7 @@ export class CommsManager {
       this.remoteSpeakerName = meta.callerName || 'Tactical Radio';
       this.isRemoteSpeaking = true;
 
-      navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      navigator.mediaDevices?.getUserMedia({ audio: true, video: false })
         .then(stream => {
           stream.getAudioTracks().forEach(t => { t.enabled = false; });
           call.answer(stream);
@@ -357,9 +409,16 @@ export class CommsManager {
   }
 
   /**
-   * Acquire local camera & microphone streams.
+   * Acquire local camera & microphone streams with 5-stage progressive fallback.
+   * GUARANTEES that video/voice calls NEVER crash or get cut even if:
+   * - Device has no webcam (desktop PC)
+   * - Webcam is busy / in use by another app (Zoom, Teams)
+   * - Camera permission is blocked in browser settings
+   * - Microphone is blocked
    */
   private async getLocalMedia(isVideo: boolean, facingMode: 'user' | 'environment' = 'user'): Promise<MediaStream> {
+    this.permissionWarning = null;
+
     if (this.localStream) {
       const hasVideo = this.localStream.getVideoTracks().length > 0;
       if (hasVideo === isVideo) {
@@ -369,24 +428,127 @@ export class CommsManager {
       this.localStream = null;
     }
 
-    const constraints: MediaStreamConstraints = {
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-      },
-      video: isVideo
-        ? {
-            facingMode,
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          }
-        : false
-    };
+    const isTouch = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
 
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
-    this.localStream = stream;
-    return stream;
+    // Attempt 1: Full requested video + audio
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          },
+          video: isVideo
+            ? (isTouch && facingMode ? { facingMode } : true)
+            : false
+        });
+        this.localStream = stream;
+        return stream;
+      } catch (err1) {
+        console.warn('Comms: Attempt 1 getUserMedia failed:', err1);
+      }
+
+      // Attempt 2: Simple audio + video without advanced constraints
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: isVideo
+        });
+        this.localStream = stream;
+        return stream;
+      } catch (err2) {
+        console.warn('Comms: Attempt 2 simple getUserMedia failed:', err2);
+      }
+
+      // Attempt 3: If video failed, fall back to Audio-Only voice call gracefully
+      if (isVideo) {
+        try {
+          const audioStream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: false
+          });
+
+          // Create a synthetic canvas video track so WebRTC video sender doesn't fail
+          const canvas = document.createElement('canvas');
+          canvas.width = 640;
+          canvas.height = 480;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(0, 0, 640, 480);
+            ctx.fillStyle = '#38bdf8';
+            ctx.font = 'bold 24px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('🎙️ Voice Relay Active', 320, 220);
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '16px sans-serif';
+            ctx.fillText('(Camera not available on this device)', 320, 260);
+          }
+          const canvasStream = (canvas as any).captureStream ? (canvas as any).captureStream(5) : null;
+          if (canvasStream && canvasStream.getVideoTracks().length > 0) {
+            audioStream.addTrack(canvasStream.getVideoTracks()[0]);
+          }
+
+          this.localStream = audioStream;
+          this.permissionWarning = 'Camera unavailable or blocked. Running in voice-call mode.';
+          if (this.session) {
+            this.session.isVideoEnabled = false;
+          }
+          this.notify();
+          return audioStream;
+        } catch (err3) {
+          console.warn('Comms: Attempt 3 audio-only fallback failed:', err3);
+        }
+      }
+    }
+
+    // Attempt 4: Synthetic silent stream so call NEVER cuts even if mic is blocked
+    this.permissionWarning = 'Microphone/Camera blocked in browser address bar. Operating in receive-only mode.';
+    this.notify();
+
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) {
+        const audioCtx = new AudioCtx();
+        const osc = audioCtx.createOscillator();
+        const dst = audioCtx.createMediaStreamDestination();
+        osc.connect(dst);
+        osc.start();
+        const dummyStream = dst.stream;
+        dummyStream.getAudioTracks().forEach(t => { t.enabled = false; });
+        this.localStream = dummyStream;
+        if (this.session) {
+          this.session.isMuted = true;
+          this.session.isVideoEnabled = false;
+        }
+        return dummyStream;
+      }
+    } catch (err4) {
+      console.warn('Comms: Attempt 4 synthetic stream failed:', err4);
+    }
+
+    // Attempt 5: Blank MediaStream
+    const empty = new MediaStream();
+    this.localStream = empty;
+    return empty;
+  }
+
+  public async retryMediaPermissions() {
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+        this.localStream = stream;
+        this.permissionWarning = null;
+        if (this.session) {
+          this.session.isVideoEnabled = true;
+          this.session.isMuted = false;
+        }
+        this.notify();
+      } catch (err) {
+        console.warn('Retry media permission error:', err);
+      }
+    }
   }
 
   // ==========================================
@@ -536,11 +698,14 @@ export class CommsManager {
       });
     }
 
-    try {
-      const stream = await this.getLocalMedia(true, 'user');
-      const remotePeerId = targetMember.peerId || this.getPeerIdForMember(targetMember.id);
+    // 2. Acquire local media with progressive fallback - NEVER throws or terminates call!
+    const stream = await this.getLocalMedia(true, 'user');
+    await this.ensurePeerOpen();
 
-      if (this.peer && !this.peer.destroyed) {
+    const remotePeerId = targetMember.peerId || this.getPeerIdForMember(targetMember.id);
+
+    if (this.peer && !this.peer.destroyed) {
+      try {
         const call = this.peer.call(remotePeerId, stream, {
           metadata: {
             type: 'video',
@@ -569,11 +734,9 @@ export class CommsManager {
         call.on('error', (err) => {
           console.warn('Video call connect error:', err);
         });
+      } catch (e) {
+        console.warn('Peer call transmit error:', e);
       }
-    } catch (err) {
-      console.error('Camera/Mic permission error for video call:', err);
-      alert('Camera & Microphone access is required for video calling. Please allow permissions in your browser or device settings.');
-      this.endCall();
     }
   }
 
@@ -607,10 +770,11 @@ export class CommsManager {
     };
     this.notify();
 
-    try {
-      const stream = await this.getLocalMedia(true, 'user');
+    // Acquire local media with progressive fallback - NEVER throws!
+    const stream = await this.getLocalMedia(true, 'user');
 
-      if (incoming.mediaConnection) {
+    if (incoming.mediaConnection) {
+      try {
         incoming.mediaConnection.answer(stream);
         this.activeMediaConnection = incoming.mediaConnection;
 
@@ -623,8 +787,12 @@ export class CommsManager {
         incoming.mediaConnection.on('close', () => {
           this.endCall();
         });
-      } else if (incoming.callerPeerId && this.peer && !this.peer.destroyed) {
-        // Answer back via caller's peer ID if signaled through Firestore
+      } catch (err) {
+        console.warn('Answer media connection error:', err);
+      }
+    } else if (incoming.callerPeerId && this.peer && !this.peer.destroyed) {
+      // Answer back via caller's peer ID if signaled through Firestore
+      try {
         const call = this.peer.call(incoming.callerPeerId, stream, {
           metadata: {
             type: 'video',
@@ -644,10 +812,9 @@ export class CommsManager {
         call.on('close', () => {
           this.endCall();
         });
+      } catch (e) {
+        console.warn('Reverse peer call error:', e);
       }
-    } catch (e) {
-      console.warn('Failed to answer incoming video call:', e);
-      this.endCall();
     }
   }
 
@@ -746,6 +913,7 @@ export class CommsManager {
     this.isPttPressed = false;
     this.remoteSpeakerName = null;
     this.isRemoteSpeaking = false;
+    this.permissionWarning = null;
 
     if (this.signalBridge) {
       this.signalBridge({ activeCall: null });

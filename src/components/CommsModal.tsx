@@ -28,7 +28,8 @@ import {
   Activity, 
   Maximize2, 
   Minimize2,
-  Volume2
+  Volume2,
+  AlertTriangle
 } from 'lucide-react';
 
 interface CommsModalProps {
@@ -52,6 +53,7 @@ export const CommsModal: React.FC<CommsModalProps> = ({
   const [remoteSpeaker, setRemoteSpeaker] = useState<{ name: string; isSpeaking: boolean } | null>(commsManager.getRemoteSpeaker());
   const [callDuration, setCallDuration] = useState<number>(0);
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
+  const [permissionWarning, setPermissionWarning] = useState<string | null>(commsManager.getPermissionWarning());
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -64,6 +66,7 @@ export const CommsModal: React.FC<CommsModalProps> = ({
       setIncomingCall(commsManager.getIncomingCall());
       setIsPttPressed(commsManager.isPttActive());
       setRemoteSpeaker(commsManager.getRemoteSpeaker());
+      setPermissionWarning(commsManager.getPermissionWarning());
     });
     return () => unsubscribe();
   }, []);
@@ -389,6 +392,22 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                   <span className="text-slate-600">|</span>
                   <span className="font-semibold">{session.targetMember?.name || 'Peer'}</span>
                 </div>
+
+                {/* Non-intrusive Media Permission Notice */}
+                {permissionWarning && (
+                  <div className="absolute top-16 left-4 right-4 z-30 p-2.5 rounded-2xl bg-amber-950/90 border border-amber-500/50 text-amber-200 text-xs backdrop-blur-md flex items-center justify-between gap-2 shadow-2xl animate-fade-in">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                      <span className="truncate">{permissionWarning}</span>
+                    </div>
+                    <button
+                      onClick={() => commsManager.retryMediaPermissions()}
+                      className="px-2.5 py-1 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] shrink-0 transition-all cursor-pointer shadow-sm active:scale-95"
+                    >
+                      Enable Mic/Cam
+                    </button>
+                  </div>
+                )}
 
                 {/* Bottom Call Controls HUD */}
                 <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 bg-slate-950/80 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-slate-800 flex items-center gap-3">
