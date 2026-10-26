@@ -210,8 +210,12 @@ export class CommsManager {
 
   public getPeerIdForMember(memberId: string): string {
     if (!this.circleId) return '';
-    const cleanCircle = this.circleId.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
-    const cleanMember = memberId.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+    const cleanCircle = this.circleId.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase().slice(0, 16);
+    let idPart = memberId || 'unit';
+    if (this.circleId && idPart.startsWith(this.circleId)) {
+      idPart = idPart.replace(this.circleId, '');
+    }
+    const cleanMember = idPart.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase().slice(0, 24);
     return `nxt_${cleanCircle}_${cleanMember}`;
   }
 
@@ -249,7 +253,8 @@ export class CommsManager {
             { urls: 'stun:stun3.l.google.com:19302' },
             { urls: 'stun:stun4.l.google.com:19302' },
             { urls: 'stun:stun.services.mozilla.com' },
-            { urls: 'stun:global.stun.twilio.com:3478' }
+            { urls: 'stun:global.stun.twilio.com:3478' },
+            { urls: 'stun:stun.relay.metered.ca:80' }
           ]
         }
       });
@@ -350,8 +355,47 @@ export class CommsManager {
       callerRole: callData.callerRole,
       callerPeerId: callData.callerPeerId,
       isVideo: callData.type === 'video',
-      mediaConnection: undefined
+      mediaConnection: this.incomingCall?.mediaConnection || undefined
     };
+    this.notify();
+  }
+
+  /**
+   * Universal handler to bind incoming WebRTC MediaStream to UI and dedicated audio decoder.
+   */
+  private setupRemoteStream(remoteMediaStream: MediaStream) {
+    radioAudio.playCallConnected();
+    this.remoteStream = remoteMediaStream;
+    if (this.session) {
+      this.session.status = 'connected';
+    }
+
+    // Direct playback through dedicated live audio element
+    try {
+      const audio = this.getOrCreateLiveAudioElement();
+      if (audio.srcObject !== remoteMediaStream) {
+        audio.srcObject = remoteMediaStream;
+      }
+      audio.play().catch(() => {});
+    } catch {}
+
+    // Track dynamic changes in incoming audio/video tracks (e.g. video track resolving after audio)
+    const notifyTracks = () => {
+      this.notify();
+    };
+    try {
+      remoteMediaStream.onaddtrack = notifyTracks;
+      remoteMediaStream.onremovetrack = notifyTracks;
+      remoteMediaStream.getVideoTracks().forEach(t => {
+        t.onunmute = notifyTracks;
+        t.onended = notifyTracks;
+      });
+      remoteMediaStream.getAudioTracks().forEach(t => {
+        t.onunmute = notifyTracks;
+        t.onended = notifyTracks;
+      });
+    } catch {}
+
     this.notify();
   }
 
@@ -383,18 +427,24 @@ export class CommsManager {
          this.session.targetMember.id.endsWith(meta.callerId || '') ||
          meta.callerId?.endsWith(this.session.targetMember.id))
       ) {
-        call.answer(this.localStream || undefined);
+        if (!this.localStream) {
+          this.getLocalMedia(true, 'user').then(s => {
+            call.answer(s);
+          }).catch(() => {
+            call.answer();
+          });
+        } else {
+          call.answer(this.localStream);
+        }
+
         this.activeMediaConnection = call;
         call.on('stream', (remoteMediaStream) => {
-          radioAudio.playCallConnected();
-          this.remoteStream = remoteMediaStream;
-          if (this.session) {
-            this.session.status = 'connected';
-          }
-          this.notify();
+          this.setupRemoteStream(remoteMediaStream);
         });
         call.on('close', () => {
-          this.endCall();
+          if (this.activeMediaConnection === call) {
+            this.endCall();
+          }
         });
         return;
       }
@@ -424,18 +474,16 @@ export class CommsManager {
       } catch {}
 
       call.on('stream', (remoteMediaStream) => {
-        this.remoteStream = remoteMediaStream;
-        const audio = this.getOrCreateLiveAudioElement();
-        audio.srcObject = remoteMediaStream;
-        audio.play().catch(() => {});
-        this.notify();
+        this.setupRemoteStream(remoteMediaStream);
       });
 
       call.on('close', () => {
-        radioAudio.playRogerBeep();
-        this.isRemoteSpeaking = false;
-        this.remoteSpeakerName = null;
-        this.notify();
+        if (this.activeMediaConnection === call) {
+          radioAudio.playRogerBeep();
+          this.isRemoteSpeaking = false;
+          this.remoteSpeakerName = null;
+          this.notify();
+        }
       });
 
       this.notify();
@@ -958,7 +1006,11 @@ export class CommsManager {
     };
     this.notify();
 
-    // 1. Publish call signal to Firestore so target phone rings instantly!
+    // 1. Acquire local media FIRST with progressive fallback - guarantees active camera/mic tracks
+    const stream = await this.getLocalMedia(true, 'user');
+    await this.ensurePeerOpen();
+
+    // 2. Publish call signal to Firestore so target phone rings with verified caller peer ID!
     if (this.signalBridge && this.currentMember) {
       this.signalBridge({
         activeCall: {
@@ -974,10 +1026,6 @@ export class CommsManager {
         }
       });
     }
-
-    // 2. Acquire local media with progressive fallback - NEVER throws or terminates call!
-    const stream = await this.getLocalMedia(true, 'user');
-    await this.ensurePeerOpen();
 
     const remotePeerId = targetMember.peerId || this.getPeerIdForMember(targetMember.id);
 
@@ -996,16 +1044,13 @@ export class CommsManager {
         this.activeMediaConnection = call;
 
         call.on('stream', (remoteMediaStream) => {
-          radioAudio.playCallConnected();
-          this.remoteStream = remoteMediaStream;
-          if (this.session) {
-            this.session.status = 'connected';
-          }
-          this.notify();
+          this.setupRemoteStream(remoteMediaStream);
         });
 
         call.on('close', () => {
-          this.endCall();
+          if (this.activeMediaConnection === call) {
+            this.endCall();
+          }
         });
 
         call.on('error', (err) => {
@@ -1054,7 +1099,10 @@ export class CommsManager {
     };
     this.notify();
 
-    // Signal connected state to Firestore bridge so caller knows call is answered and ringtone halts everywhere
+    // 1. Acquire local media FIRST with progressive fallback - NEVER throws!
+    const stream = await this.getLocalMedia(true, 'user');
+
+    // 2. Signal connected state to Firestore bridge so caller knows call is answered and ringtone halts everywhere
     if (this.signalBridge && this.currentMember) {
       this.signalBridge({
         activeCall: {
@@ -1071,22 +1119,19 @@ export class CommsManager {
       });
     }
 
-    // Acquire local media with progressive fallback - NEVER throws!
-    const stream = await this.getLocalMedia(true, 'user');
-
     if (incoming.mediaConnection) {
       try {
         incoming.mediaConnection.answer(stream);
         this.activeMediaConnection = incoming.mediaConnection;
 
         incoming.mediaConnection.on('stream', (remoteMediaStream) => {
-          radioAudio.playCallConnected();
-          this.remoteStream = remoteMediaStream;
-          this.notify();
+          this.setupRemoteStream(remoteMediaStream);
         });
 
         incoming.mediaConnection.on('close', () => {
-          this.endCall();
+          if (this.activeMediaConnection === incoming.mediaConnection) {
+            this.endCall();
+          }
         });
       } catch (err) {
         console.warn('Answer media connection error:', err);
@@ -1105,13 +1150,13 @@ export class CommsManager {
         this.activeMediaConnection = call;
 
         call.on('stream', (remoteMediaStream) => {
-          radioAudio.playCallConnected();
-          this.remoteStream = remoteMediaStream;
-          this.notify();
+          this.setupRemoteStream(remoteMediaStream);
         });
 
         call.on('close', () => {
-          this.endCall();
+          if (this.activeMediaConnection === call) {
+            this.endCall();
+          }
         });
       } catch (e) {
         console.warn('Reverse peer call error:', e);

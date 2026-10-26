@@ -163,7 +163,14 @@ export const CommsModal: React.FC<CommsModalProps> = ({
       if (remoteVideoRef.current.srcObject !== remoteStream) {
         remoteVideoRef.current.srcObject = remoteStream;
       }
-      remoteVideoRef.current.play().catch(() => {});
+      // Try playing unmuted; if autoplay policy on mobile/browser restricts it, fallback to muted so video renders immediately while liveAudioElement delivers the sound
+      remoteVideoRef.current.play().catch((err) => {
+        console.warn('Remote video unmuted autoplay restricted, playing muted with audio element relay:', err);
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.muted = true;
+          remoteVideoRef.current.play().catch(() => {});
+        }
+      });
     }
   }, [session, session?.status, streamTick]);
 
@@ -267,6 +274,9 @@ export const CommsModal: React.FC<CommsModalProps> = ({
   if (!isOpen && !incomingCall && !session) {
     return null;
   }
+
+  const remoteStream = commsManager.getRemoteStream();
+  const hasRemoteVideo = Boolean(remoteStream && remoteStream.getVideoTracks().some(t => t.readyState === 'live' && t.enabled));
 
   return (
     <>
@@ -448,6 +458,21 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                     <div className="mt-4 flex items-center gap-1.5 text-xs text-slate-400">
                       <Activity className="w-4 h-4 text-emerald-400 animate-spin" />
                       <span>Negotiating STUN traversal between cities…</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Active Call Video Buffering / Warmup Indicator */}
+                {session.status === 'connected' && !hasRemoteVideo && (
+                  <div className="absolute inset-0 bg-slate-950/85 flex flex-col items-center justify-center p-6 text-center z-10 pointer-events-none">
+                    <div className="w-20 h-20 rounded-full bg-blue-600/20 border-2 border-blue-500/50 flex items-center justify-center text-4xl mb-4 animate-pulse">
+                      {session.targetMember?.avatar || '👤'}
+                    </div>
+                    <h4 className="text-xl font-bold text-white">{session.targetMember?.name || 'Member'}</h4>
+                    <p className="text-xs text-emerald-400 mt-1 font-mono">LIVE CALL CONNECTED</p>
+                    <div className="mt-3 flex items-center gap-1.5 text-xs text-slate-400">
+                      <Activity className="w-4 h-4 text-emerald-400 animate-spin" />
+                      <span>Connecting remote video feed…</span>
                     </div>
                   </div>
                 )}
