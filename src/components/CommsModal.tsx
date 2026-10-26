@@ -59,6 +59,72 @@ export const CommsModal: React.FC<CommsModalProps> = ({
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const pttButtonRef = useRef<HTMLButtonElement>(null);
+  const isPttPointerDown = useRef<boolean>(false);
+  const pttPressStartTime = useRef<number>(0);
+
+  const handlePttDown = (e: React.SyntheticEvent | Event) => {
+    try {
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+    } catch {}
+
+    if (isPttPointerDown.current) return;
+    isPttPointerDown.current = true;
+    pttPressStartTime.current = Date.now();
+
+    radioAudio.resumeContext();
+    if (typeof window !== 'undefined' && (window as any).NexusNative?.ensureMediaPermissions) {
+      try { (window as any).NexusNative.ensureMediaPermissions(); } catch {}
+    }
+
+    if (commsManager.isPttActive()) {
+      // Toggle off if already talking
+      commsManager.releasePtt();
+    } else {
+      // Start talking immediately on hold/press
+      commsManager.pressPtt();
+    }
+  };
+
+  const handlePttUp = (e: React.SyntheticEvent | Event) => {
+    try {
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+    } catch {}
+
+    if (!isPttPointerDown.current) return;
+    isPttPointerDown.current = false;
+
+    const duration = Date.now() - pttPressStartTime.current;
+    if (duration >= 250) {
+      // User held the button down: stop talking on finger/pointer release
+      commsManager.releasePtt();
+    }
+    // If duration < 250, it was a quick click/tap: keep transmitting (toggle mode) until next tap
+  };
+
+  // Global window release listener for safe PTT release even if pointer leaves button
+  useEffect(() => {
+    const handleGlobalPttRelease = () => {
+      if (isPttPointerDown.current) {
+        isPttPointerDown.current = false;
+        const duration = Date.now() - pttPressStartTime.current;
+        if (duration >= 250) {
+          commsManager.releasePtt();
+        }
+      }
+    };
+    window.addEventListener('pointerup', handleGlobalPttRelease);
+    window.addEventListener('mouseup', handleGlobalPttRelease);
+    window.addEventListener('touchend', handleGlobalPttRelease);
+    window.addEventListener('touchcancel', handleGlobalPttRelease);
+    return () => {
+      window.removeEventListener('pointerup', handleGlobalPttRelease);
+      window.removeEventListener('mouseup', handleGlobalPttRelease);
+      window.removeEventListener('touchend', handleGlobalPttRelease);
+      window.removeEventListener('touchcancel', handleGlobalPttRelease);
+    };
+  }, []);
 
   // Sync state with commsManager
   useEffect(() => {
@@ -547,24 +613,29 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                 <div className="flex flex-col items-center">
                   <button
                     ref={pttButtonRef}
-                    onPointerDown={() => {
-                      radioAudio.resumeContext();
-                      commsManager.pressPtt();
-                    }}
-                    onPointerUp={() => commsManager.releasePtt()}
-                    onPointerCancel={() => commsManager.releasePtt()}
+                    type="button"
+                    onPointerDown={handlePttDown}
+                    onPointerUp={handlePttUp}
+                    onPointerCancel={handlePttUp}
+                    onTouchStart={handlePttDown}
+                    onTouchEnd={handlePttUp}
+                    onTouchCancel={handlePttUp}
+                    onMouseDown={handlePttDown}
+                    onMouseUp={handlePttUp}
+                    onContextMenu={(e) => e.preventDefault()}
                     className={`relative w-40 h-40 sm:w-48 sm:h-48 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-2xl touch-none ${
                       isPttPressed
-                        ? 'bg-gradient-to-b from-red-600 to-red-700 text-white ring-8 ring-red-500/30 shadow-red-600/50'
+                        ? 'bg-gradient-to-b from-red-600 to-red-700 text-white ring-8 ring-red-500/30 shadow-red-600/50 scale-102'
                         : 'bg-gradient-to-b from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white ring-8 ring-blue-500/20 shadow-blue-600/30'
                     }`}
+                    style={{ touchAction: 'none', WebkitUserSelect: 'none', userSelect: 'none', WebkitTouchCallout: 'none' }}
                   >
-                    <Radio className={`w-12 h-12 mb-2 ${isPttPressed ? 'animate-bounce' : ''}`} />
-                    <span className="font-extrabold text-sm sm:text-base tracking-wider uppercase">
+                    <Radio className={`w-12 h-12 mb-2 pointer-events-none ${isPttPressed ? 'animate-bounce' : ''}`} />
+                    <span className="font-extrabold text-sm sm:text-base tracking-wider uppercase pointer-events-none">
                       {isPttPressed ? 'TRANSMITTING' : 'PUSH TO TALK'}
                     </span>
-                    <span className="text-[10px] text-blue-200 mt-0.5">
-                      {isPttPressed ? 'Release to End (Roger)' : 'Press & Hold or Spacebar'}
+                    <span className="text-[10px] text-blue-200 mt-0.5 pointer-events-none">
+                      {isPttPressed ? 'Release or Tap to End' : 'Press & Hold or Tap to Talk'}
                     </span>
                   </button>
 

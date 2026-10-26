@@ -46,6 +46,9 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
   const [remoteSpeaker, setRemoteSpeaker] = useState<{ name: string; isSpeaking: boolean } | null>(commsManager.getRemoteSpeaker());
   const [transmissionCount, setTransmissionCount] = useState<number>(0);
 
+  const isPointerDownRef = useRef<boolean>(false);
+  const pressStartTimeRef = useRef<number>(0);
+
   // Sync state with commsManager
   useEffect(() => {
     const unsub = commsManager.subscribe(() => {
@@ -58,17 +61,23 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
   // Global pointer release listener (guarantees PTT stops even if released outside button)
   useEffect(() => {
     const handleGlobalRelease = () => {
-      if (commsManager.isPttActive()) {
-        handlePttEnd();
+      if (isPointerDownRef.current) {
+        isPointerDownRef.current = false;
+        const duration = Date.now() - pressStartTimeRef.current;
+        if (duration >= 250) {
+          handlePttEnd();
+        }
       }
     };
     window.addEventListener('pointerup', handleGlobalRelease);
     window.addEventListener('mouseup', handleGlobalRelease);
     window.addEventListener('touchend', handleGlobalRelease);
+    window.addEventListener('touchcancel', handleGlobalRelease);
     return () => {
       window.removeEventListener('pointerup', handleGlobalRelease);
       window.removeEventListener('mouseup', handleGlobalRelease);
       window.removeEventListener('touchend', handleGlobalRelease);
+      window.removeEventListener('touchcancel', handleGlobalRelease);
     };
   }, []);
 
@@ -113,6 +122,38 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
   const handlePttEnd = () => {
     commsManager.releasePtt();
     setIsPttPressed(false);
+  };
+
+  const handlePointerDownAction = (e: React.SyntheticEvent | Event) => {
+    try {
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+    } catch {}
+
+    if (isPointerDownRef.current) return;
+    isPointerDownRef.current = true;
+    pressStartTimeRef.current = Date.now();
+
+    if (commsManager.isPttActive()) {
+      handlePttEnd();
+    } else {
+      handlePttStart();
+    }
+  };
+
+  const handlePointerUpAction = (e: React.SyntheticEvent | Event) => {
+    try {
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+    } catch {}
+
+    if (!isPointerDownRef.current) return;
+    isPointerDownRef.current = false;
+
+    const duration = Date.now() - pressStartTimeRef.current;
+    if (duration >= 250) {
+      handlePttEnd();
+    }
   };
 
   // Other circle members
@@ -231,21 +272,28 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
         {/* THE BIG PUSH-TO-TALK BUTTON */}
         <button
           type="button"
-          onPointerDown={handlePttStart}
-          onPointerUp={handlePttEnd}
-          onPointerCancel={handlePttEnd}
+          onPointerDown={handlePointerDownAction}
+          onPointerUp={handlePointerUpAction}
+          onPointerCancel={handlePointerUpAction}
+          onTouchStart={handlePointerDownAction}
+          onTouchEnd={handlePointerUpAction}
+          onTouchCancel={handlePointerUpAction}
+          onMouseDown={handlePointerDownAction}
+          onMouseUp={handlePointerUpAction}
+          onContextMenu={(e) => e.preventDefault()}
           className={`relative w-40 h-40 sm:w-44 sm:h-44 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-2xl touch-none ${
             isPttPressed
               ? 'bg-gradient-to-b from-red-600 to-red-700 text-white ring-8 ring-red-500/30 shadow-red-600/50 scale-102'
               : 'bg-gradient-to-b from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white ring-8 ring-blue-500/20 shadow-blue-600/30'
           }`}
+          style={{ touchAction: 'none', WebkitUserSelect: 'none', userSelect: 'none', WebkitTouchCallout: 'none' }}
         >
-          <Radio className={`w-11 h-11 mb-1.5 ${isPttPressed ? 'animate-bounce' : ''}`} />
-          <span className="font-black text-sm tracking-wider uppercase">
+          <Radio className={`w-11 h-11 mb-1.5 pointer-events-none ${isPttPressed ? 'animate-bounce' : ''}`} />
+          <span className="font-black text-sm tracking-wider uppercase pointer-events-none">
             {isPttPressed ? 'TRANSMITTING' : 'PUSH TO TALK'}
           </span>
-          <span className="text-[10px] text-blue-200 mt-0.5">
-            {isPttPressed ? 'Release to End (Roger)' : 'Hold to Speak or Spacebar'}
+          <span className="text-[10px] text-blue-200 mt-0.5 pointer-events-none">
+            {isPttPressed ? 'Release or Tap to End' : 'Press & Hold or Tap to Talk'}
           </span>
         </button>
 

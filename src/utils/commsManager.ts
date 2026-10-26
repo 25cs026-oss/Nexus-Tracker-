@@ -730,11 +730,16 @@ export class CommsManager {
   public async pressPtt() {
     if (this.isPttPressed) return;
     this.isPttPressed = true;
+    this.notify();
     radioAudio.playPttStartChirp();
     this.pttRecordedChunks = [];
 
     try {
       const stream = await this.getLocalMedia(false);
+      if (!this.isPttPressed) {
+        stream.getAudioTracks().forEach(t => { t.enabled = false; });
+        return;
+      }
       stream.getAudioTracks().forEach(t => { t.enabled = true; });
 
       // Start MediaRecorder for voice burst delivery
@@ -802,6 +807,7 @@ export class CommsManager {
   public releasePtt() {
     if (!this.isPttPressed) return;
     this.isPttPressed = false;
+    this.notify();
     radioAudio.playRogerBeep();
 
     if (this.localStream) {
