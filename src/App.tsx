@@ -270,6 +270,7 @@ export default function App() {
   const [dismissedSosMemberId, setDismissedSosMemberId] = useState<string | null>(null);
   const [isSirenMuted, setIsSirenMuted] = useState<boolean>(false);
   const lastAlertedSosId = useRef<string | null>(null);
+  const [circleActiveSos, setCircleActiveSos] = useState<any>(null);
   const [showCheckInModal, setShowCheckInModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
@@ -789,13 +790,16 @@ export default function App() {
       if (snap.exists()) {
         const data = snap.data() as any;
         if (data.safeZones) setSafeZones(data.safeZones);
+        setCircleActiveSos(data.activeSos || null);
 
         // Immediate Circle-Level SOS Broadcast Detection
         if (data.activeSos && data.activeSos.memberId !== memberDocId) {
           notificationManager.showSosAlertNotification(data.activeSos.memberName, data.activeSos.place);
-          sirenAudio.start();
+          if (!isSirenMuted) {
+            sirenAudio.start();
+          }
           setShowSosModal(true);
-        } else if (!data.activeSos && activeSosMember?.id !== memberDocId) {
+        } else if (!data.activeSos && (!activeSosMember || activeSosMember.id === memberDocId)) {
           sirenAudio.stop();
           notificationManager.clearSosNotification();
         }
@@ -949,16 +953,14 @@ export default function App() {
         }
       }
 
-      // Deduplicate: If multiple docs in Firestore share the same ID or name, keep only ONE clean item
+      // Deduplicate: Each physical device has its own unique memberDocId
       const seenIds = new Set<string>();
-      const seenNames = new Set<string>();
       const list: DeviceMember[] = [];
 
       // Give priority to the current user's document
-      const selfDoc = approvedOnly.find(m => m.id === memberDocId || (m.name && m.name === memberName));
+      const selfDoc = approvedOnly.find(m => m.id === memberDocId);
       if (selfDoc) {
         seenIds.add(selfDoc.id);
-        if (selfDoc.name) seenNames.add(selfDoc.name);
         list.push({
           ...selfDoc,
           id: memberDocId,
@@ -971,7 +973,6 @@ export default function App() {
         });
       } else if (currentCoords) {
         seenIds.add(memberDocId);
-        if (memberName) seenNames.add(memberName);
         list.push({
           id: memberDocId,
           name: memberName || 'You (Me)',
@@ -989,12 +990,9 @@ export default function App() {
       }
 
       for (const m of approvedOnly) {
-        if (m.id === memberDocId || (m.name && m.name === memberName)) continue;
+        if (m.id === memberDocId) continue;
         if (seenIds.has(m.id)) continue;
-        if (m.name && seenNames.has(m.name)) continue;
-
         seenIds.add(m.id);
-        if (m.name) seenNames.add(m.name);
         list.push(m);
       }
 
@@ -1452,8 +1450,21 @@ export default function App() {
     const userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat || 19.0760;
     const userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng || 72.8777;
 
+    setMembers(prev =>
+      prev.map(m => m.id === memberDocId || m.id === 'demo-you' ? { ...m, isSosActive: true } : m)
+    );
+    setCircleActiveSos({
+      memberId: memberDocId,
+      memberName: myName,
+      place: placeName,
+      lat: userLat,
+      lng: userLng,
+      timestamp: Date.now()
+    });
+
     if (!isDemoMode) {
       try {
+        // 1. Broadcast active SOS to member device document
         await setDoc(doc(db, 'devices', memberDocId), {
           id: memberDocId,
           name: myName,
@@ -1468,13 +1479,21 @@ export default function App() {
           sosMessage: placeName ? `Near ${placeName}` : 'Emergency SOS',
           sosTimestamp: serverTimestamp()
         }, { merge: true });
+
+        // 2. Broadcast active SOS to Circle document so ALL circle listeners wake up instantly!
+        await setDoc(doc(db, 'grids', currentCircle.id), {
+          activeSos: {
+            memberId: memberDocId,
+            memberName: myName,
+            place: placeName,
+            lat: userLat,
+            lng: userLng,
+            timestamp: Date.now()
+          }
+        }, { merge: true });
       } catch (err) {
-        console.warn('Failed to broadcast SOS to Firestore devices:', err);
+        console.warn('Failed to broadcast SOS to Firestore:', err);
       }
-    } else {
-      setMembers(prev =>
-        prev.map(m => m.id === memberDocId || m.id === 'demo-you' ? { ...m, isSosActive: true } : m)
-      );
     }
     setDismissedSosMemberId(null);
     setIsSirenMuted(false);
@@ -1489,6 +1508,11 @@ export default function App() {
     const userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat || 19.0760;
     const userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng || 72.8777;
 
+    setMembers(prev =>
+      prev.map(m => m.id === memberDocId || m.id === 'demo-you' ? { ...m, isSosActive: false } : m)
+    );
+    setCircleActiveSos(null);
+
     if (!isDemoMode) {
       try {
         await setDoc(doc(db, 'devices', memberDocId), { 
@@ -1499,11 +1523,11 @@ export default function App() {
           gridId: currentCircle.id,
           isSosActive: false 
         }, { merge: true });
+
+        await setDoc(doc(db, 'grids', currentCircle.id), { 
+          activeSos: null 
+        }, { merge: true });
       } catch {}
-    } else {
-      setMembers(prev =>
-        prev.map(m => m.id === memberDocId || m.id === 'demo-you' ? { ...m, isSosActive: false } : m)
-      );
     }
     sirenAudio.stop();
     setShowSosModal(false);
@@ -1514,6 +1538,11 @@ export default function App() {
   // Any member or host can mark an emergency SOS as resolved/safe
   const handleResolveSos = async (targetMemberDocId: string) => {
     try {
+      setMembers(prev =>
+        prev.map(m => m.id === targetMemberDocId || m.id === 'demo-you' ? { ...m, isSosActive: false } : m)
+      );
+      setCircleActiveSos(null);
+
       if (!isDemoMode && currentCircle) {
         const targetMember = members.find(m => m.id === targetMemberDocId);
         await setDoc(doc(db, 'devices', targetMemberDocId), { 
@@ -1524,10 +1553,10 @@ export default function App() {
           gridId: currentCircle.id,
           isSosActive: false 
         }, { merge: true });
-      } else {
-        setMembers(prev =>
-          prev.map(m => m.id === targetMemberDocId || m.id === 'demo-you' ? { ...m, isSosActive: false } : m)
-        );
+
+        await setDoc(doc(db, 'grids', currentCircle.id), { 
+          activeSos: null 
+        }, { merge: true });
       }
       sirenAudio.stop();
       setShowSosModal(false);
@@ -1744,7 +1773,20 @@ export default function App() {
     } catch {}
   };
 
-  const activeSosMember = members.find(m => m.isSosActive) || null;
+  const circleSosMember: DeviceMember | null = circleActiveSos ? {
+    id: circleActiveSos.memberId,
+    name: circleActiveSos.memberName || 'Family Member',
+    role: 'Family',
+    avatar: '🚨',
+    lastLat: Number(circleActiveSos.lat) || 19.0760,
+    lastLng: Number(circleActiveSos.lng) || 72.8777,
+    lastUpdated: null,
+    gridId: currentCircle?.id || '',
+    currentPlace: circleActiveSos.place,
+    isSosActive: true
+  } : null;
+
+  const activeSosMember = members.find(m => m.isSosActive) || circleSosMember || null;
   const isCurrentUserSos = activeSosMember?.id === `${currentCircle?.id}_${deviceId}` || (isDemoMode && activeSosMember?.id === 'demo-you');
 
   // Real-time Emergency SOS Audio Siren & Status Bar Notification Effect
