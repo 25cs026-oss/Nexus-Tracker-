@@ -54,6 +54,7 @@ export const CommsModal: React.FC<CommsModalProps> = ({
   const [callDuration, setCallDuration] = useState<number>(0);
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
   const [permissionWarning, setPermissionWarning] = useState<string | null>(commsManager.getPermissionWarning());
+  const [streamTick, setStreamTick] = useState<number>(0);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -67,6 +68,7 @@ export const CommsModal: React.FC<CommsModalProps> = ({
       setIsPttPressed(commsManager.isPttActive());
       setRemoteSpeaker(commsManager.getRemoteSpeaker());
       setPermissionWarning(commsManager.getPermissionWarning());
+      setStreamTick(t => t + 1);
     });
     return () => unsubscribe();
   }, []);
@@ -75,14 +77,20 @@ export const CommsModal: React.FC<CommsModalProps> = ({
   useEffect(() => {
     const localStream = commsManager.getLocalStream();
     if (localVideoRef.current && localStream) {
-      localVideoRef.current.srcObject = localStream;
+      if (localVideoRef.current.srcObject !== localStream) {
+        localVideoRef.current.srcObject = localStream;
+      }
+      localVideoRef.current.play().catch(() => {});
     }
 
     const remoteStream = commsManager.getRemoteStream();
     if (remoteVideoRef.current && remoteStream) {
-      remoteVideoRef.current.srcObject = remoteStream;
+      if (remoteVideoRef.current.srcObject !== remoteStream) {
+        remoteVideoRef.current.srcObject = remoteStream;
+      }
+      remoteVideoRef.current.play().catch(() => {});
     }
-  }, [session, session?.status]);
+  }, [session, session?.status, streamTick]);
 
   // Call duration timer
   useEffect(() => {

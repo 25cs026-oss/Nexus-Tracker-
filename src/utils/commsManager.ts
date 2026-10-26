@@ -87,6 +87,7 @@ export class CommsManager {
   private remoteSpeakerName: string | null = null;
   private isRemoteSpeaking: boolean = false;
   private permissionWarning: string | null = null;
+  private handledCallTimestamps: Set<number> = new Set();
 
   // Audio elements for playback
   private remoteAudioElement: HTMLAudioElement | null = null;
@@ -306,17 +307,22 @@ export class CommsManager {
     callerPeerId: string;
     timestamp: number;
   }) {
-    if (this.session && this.session.status === 'connected') {
+    if (this.session && (this.session.status === 'connected' || this.session.status === 'connecting')) {
       return; // Already in a call
+    }
+
+    if (this.handledCallTimestamps.has(callData.timestamp)) {
+      return; // Already handled or alerted for this call
     }
 
     if (this.incomingCall && this.incomingCall.callerId === callData.callerId) {
       return; // Already alerting for this incoming call
     }
 
+    this.handledCallTimestamps.add(callData.timestamp);
     radioAudio.startIncomingCallRingtone();
     this.incomingCall = {
-      callId: callData.callerPeerId || callData.callerId,
+      callId: String(callData.timestamp || callData.callerPeerId || callData.callerId),
       callerId: callData.callerId,
       callerName: callData.callerName || 'Circle Member',
       callerAvatar: callData.callerAvatar || '👤',
@@ -332,8 +338,8 @@ export class CommsManager {
    * When caller cancels or call terminates remotely.
    */
   public handleRemoteCallEnded() {
+    radioAudio.stopIncomingCallRingtone();
     if (this.incomingCall) {
-      radioAudio.stopIncomingCallRingtone();
       this.incomingCall = null;
       this.notify();
     }
@@ -459,8 +465,32 @@ export class CommsManager {
           this.notify();
         };
       })
-      .catch((err) => {
-        console.warn('Audio burst play note:', err);
+      .catch(async (err) => {
+        console.warn('Audio element play note (trying AudioContext decode):', err);
+        try {
+          const res = await fetch(audioData);
+          const buf = await res.arrayBuffer();
+          const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+          if (AudioCtxClass) {
+            const ctx = new AudioCtxClass();
+            if (ctx.state === 'suspended') await ctx.resume();
+            const decoded = await ctx.decodeAudioData(buf);
+            const source = ctx.createBufferSource();
+            source.buffer = decoded;
+            source.connect(ctx.destination);
+            source.onended = () => {
+              radioAudio.playRogerBeep();
+              this.isRemoteSpeaking = false;
+              this.remoteSpeakerName = null;
+              this.notify();
+            };
+            source.start(0);
+            return;
+          }
+        } catch (ctxErr) {
+          console.warn('AudioContext playback fallback note:', ctxErr);
+        }
+
         setTimeout(() => {
           radioAudio.playRogerBeep();
           this.isRemoteSpeaking = false;
@@ -492,24 +522,31 @@ export class CommsManager {
   }
 
   /**
-   * Acquire local camera & microphone streams with 5-stage progressive fallback.
+   * Acquire local camera & microphone streams with progressive multi-stage fallback.
    */
   private async getLocalMedia(isVideo: boolean, facingMode: 'user' | 'environment' = 'user'): Promise<MediaStream> {
     this.permissionWarning = null;
 
+    // 0. Proactively trigger native Android permission prompt if inside Android APK shell
+    if (typeof window !== 'undefined' && (window as any).NexusNative?.ensureMediaPermissions) {
+      try {
+        (window as any).NexusNative.ensureMediaPermissions();
+      } catch {}
+    }
+
+    // Check if existing localStream is still valid and has live tracks
     if (this.localStream) {
-      const hasVideo = this.localStream.getVideoTracks().length > 0;
-      if (hasVideo === isVideo) {
+      const hasLiveVideo = this.localStream.getVideoTracks().some(t => t.readyState === 'live');
+      const hasLiveAudio = this.localStream.getAudioTracks().some(t => t.readyState === 'live');
+      if ((isVideo ? hasLiveVideo : true) && hasLiveAudio) {
         return this.localStream;
       }
-      this.localStream.getTracks().forEach(t => t.stop());
+      this.localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
       this.localStream = null;
     }
 
-    const isTouch = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
-
-    // Attempt 1: Full requested video + audio
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      // Attempt 1: Full requested video + audio with flexible ideal constraints (safe on Android)
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -517,17 +554,19 @@ export class CommsManager {
             noiseSuppression: true,
             autoGainControl: true
           },
-          video: isVideo
-            ? (isTouch && facingMode ? { facingMode } : true)
-            : false
+          video: isVideo ? {
+            facingMode: { ideal: facingMode },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          } : false
         });
         this.localStream = stream;
         return stream;
       } catch (err1) {
-        console.warn('Comms: Attempt 1 getUserMedia failed:', err1);
+        console.warn('Comms: Attempt 1 getUserMedia flexible constraints note:', err1);
       }
 
-      // Attempt 2: Simple audio + video without advanced constraints
+      // Attempt 2: Simple boolean audio + video
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: true,
@@ -536,10 +575,45 @@ export class CommsManager {
         this.localStream = stream;
         return stream;
       } catch (err2) {
-        console.warn('Comms: Attempt 2 simple getUserMedia failed:', err2);
+        console.warn('Comms: Attempt 2 simple boolean constraints note:', err2);
       }
 
-      // Attempt 3: If video failed, fall back to Audio-Only voice call gracefully
+      // Attempt 3: Separate Video & Audio track acquisition (fixes Android WebView driver contention)
+      if (isVideo) {
+        try {
+          let videoTrack: MediaStreamTrack | null = null;
+          let audioTrack: MediaStreamTrack | null = null;
+
+          try {
+            const vStream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: { ideal: facingMode } }
+            });
+            videoTrack = vStream.getVideoTracks()[0] || null;
+          } catch {
+            try {
+              const vStreamFallback = await navigator.mediaDevices.getUserMedia({ video: true });
+              videoTrack = vStreamFallback.getVideoTracks()[0] || null;
+            } catch {}
+          }
+
+          try {
+            const aStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioTrack = aStream.getAudioTracks()[0] || null;
+          } catch {}
+
+          if (videoTrack || audioTrack) {
+            const combined = new MediaStream();
+            if (videoTrack) combined.addTrack(videoTrack);
+            if (audioTrack) combined.addTrack(audioTrack);
+            this.localStream = combined;
+            return combined;
+          }
+        } catch (err3) {
+          console.warn('Comms: Attempt 3 separate track acquisition note:', err3);
+        }
+      }
+
+      // Attempt 4: Audio-Only fallback with canvas track if camera hardware failed
       if (isVideo) {
         try {
           const audioStream = await navigator.mediaDevices.getUserMedia({
@@ -575,13 +649,13 @@ export class CommsManager {
           }
           this.notify();
           return audioStream;
-        } catch (err3) {
-          console.warn('Comms: Attempt 3 audio-only fallback failed:', err3);
+        } catch (err4) {
+          console.warn('Comms: Attempt 4 audio-only fallback failed:', err4);
         }
       }
     }
 
-    // Attempt 4: Synthetic silent stream so call NEVER cuts even if mic is blocked
+    // Attempt 5: Synthetic silent stream so call NEVER cuts even if mic is blocked
     this.permissionWarning = 'Microphone/Camera blocked in browser address bar. Operating in receive-only mode.';
     this.notify();
 
@@ -602,11 +676,11 @@ export class CommsManager {
         }
         return dummyStream;
       }
-    } catch (err4) {
-      console.warn('Comms: Attempt 4 synthetic stream failed:', err4);
+    } catch (err5) {
+      console.warn('Comms: Attempt 5 synthetic stream failed:', err5);
     }
 
-    // Attempt 5: Blank MediaStream
+    // Attempt 6: Blank MediaStream
     const empty = new MediaStream();
     this.localStream = empty;
     return empty;
@@ -882,6 +956,13 @@ export class CommsManager {
     const incoming = this.incomingCall;
     this.incomingCall = null;
 
+    if (incoming.callId) {
+      const ts = Number(incoming.callId);
+      if (!isNaN(ts)) {
+        this.handledCallTimestamps.add(ts);
+      }
+    }
+
     this.session = {
       mode: 'video',
       targetMember: {
@@ -901,6 +982,23 @@ export class CommsManager {
       startedAt: Date.now()
     };
     this.notify();
+
+    // Signal connected state to Firestore bridge so caller knows call is answered and ringtone halts everywhere
+    if (this.signalBridge && this.currentMember) {
+      this.signalBridge({
+        activeCall: {
+          callerId: incoming.callerId,
+          callerName: incoming.callerName,
+          callerAvatar: incoming.callerAvatar,
+          callerRole: incoming.callerRole,
+          targetMemberId: this.currentMember.id,
+          type: 'video',
+          status: 'connected',
+          callerPeerId: this.myPeerId || this.getPeerIdForMember(this.currentMember.id),
+          timestamp: Date.now()
+        }
+      });
+    }
 
     // Acquire local media with progressive fallback - NEVER throws!
     const stream = await this.getLocalMedia(true, 'user');
@@ -957,6 +1055,10 @@ export class CommsManager {
     radioAudio.stopIncomingCallRingtone();
     radioAudio.playCallEndTone();
     if (this.incomingCall) {
+      if (this.incomingCall.callId) {
+        const ts = Number(this.incomingCall.callId);
+        if (!isNaN(ts)) this.handledCallTimestamps.add(ts);
+      }
       try { this.incomingCall.mediaConnection?.close(); } catch {}
       this.incomingCall = null;
     }

@@ -64,6 +64,7 @@ import { WalkieTalkieStation } from './components/WalkieTalkieStation';
 import { backgroundRunner } from './utils/backgroundRunner';
 import { notificationManager } from './utils/notificationManager';
 import { sirenAudio } from './utils/sirenAudio';
+import { radioAudio } from './utils/radioAudio';
 import { commsManager } from './utils/commsManager';
 
 import { 
@@ -248,6 +249,7 @@ export default function App() {
   });
   const seenAlertedCheckInIds = useRef<Set<string>>(new Set());
   const seenRadioBurstTimestamps = useRef<Set<number>>(new Set());
+  const handledCallTimestamps = useRef<Set<number>>(new Set());
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [weather, setWeather] = useState<{ temp: number; condition: string } | null>(null);
 
@@ -829,18 +831,42 @@ export default function App() {
 
         // Live Comms & Video Call Signaling Detection
         if (m.activeCall && m.activeCall.targetMemberId === memberDocId) {
+          const callTime = m.activeCall.timestamp || 0;
           if (m.activeCall.status === 'ringing') {
-            const ageMs = Date.now() - (m.activeCall.timestamp || 0);
-            if (ageMs < 45000) {
-              commsManager.handleRemoteIncomingCallSignal(m.activeCall);
-              setShowCommsModal(true);
-              notificationManager.showImportantNotification(
-                `📹 Live Video Call: ${m.activeCall.callerName}`,
-                'Incoming call. Tap to answer.'
-              );
+            const ageMs = Date.now() - callTime;
+            if (ageMs < 45000 && !handledCallTimestamps.current.has(callTime)) {
+              const currentSession = commsManager.getSession();
+              if (!currentSession || currentSession.status !== 'connected') {
+                handledCallTimestamps.current.add(callTime);
+                commsManager.handleRemoteIncomingCallSignal(m.activeCall);
+                setShowCommsModal(true);
+                notificationManager.showImportantNotification(
+                  `📹 Live Video Call: ${m.activeCall.callerName}`,
+                  'Incoming call. Tap to answer.'
+                );
+              }
+            }
+          } else if (m.activeCall.status === 'connected') {
+            handledCallTimestamps.current.add(callTime);
+            radioAudio.stopIncomingCallRingtone();
+          } else if (m.activeCall.status === 'ended') {
+            handledCallTimestamps.current.add(callTime);
+            radioAudio.stopIncomingCallRingtone();
+            commsManager.handleRemoteCallEnded();
+          }
+        }
+
+        // If I am caller and remote party accepted or ended
+        if (m.activeCall && m.activeCall.callerId === memberDocId) {
+          if (m.activeCall.status === 'connected') {
+            radioAudio.stopIncomingCallRingtone();
+            const session = commsManager.getSession();
+            if (session && session.status === 'connecting') {
+              session.status = 'connected';
             }
           } else if (m.activeCall.status === 'ended') {
-            commsManager.handleRemoteCallEnded();
+            radioAudio.stopIncomingCallRingtone();
+            commsManager.endCall();
           }
         }
 

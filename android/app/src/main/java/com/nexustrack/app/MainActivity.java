@@ -53,6 +53,8 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String TAG = "NexusMainActivity";
     private static final int PERMISSION_REQ_CODE = 4001;
+    private static final int MEDIA_PERMISSION_REQ_CODE = 4002;
+    private PermissionRequest pendingMediaRequest = null;
 
     // Local in-memory offline fallback
     private static final String LOCAL_ORIGIN = "https://localhost";
@@ -86,6 +88,22 @@ public class MainActivity extends AppCompatActivity {
         @JavascriptInterface
         public boolean isNative() {
             return true;
+        }
+
+        @JavascriptInterface
+        public void ensureMediaPermissions() {
+            runOnUiThread(() -> {
+                List<String> needed = new ArrayList<>();
+                if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    needed.add(Manifest.permission.RECORD_AUDIO);
+                }
+                if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                    needed.add(Manifest.permission.CAMERA);
+                }
+                if (!needed.isEmpty()) {
+                    ActivityCompat.requestPermissions(MainActivity.this, needed.toArray(new String[0]), MEDIA_PERMISSION_REQ_CODE);
+                }
+            });
         }
 
         @JavascriptInterface
@@ -235,10 +253,12 @@ public class MainActivity extends AppCompatActivity {
                             }
                         }
 
-                        if (!neededPermissions.isEmpty()) {
-                            ActivityCompat.requestPermissions(MainActivity.this, neededPermissions.toArray(new String[0]), PERMISSION_REQ_CODE);
+                        if (neededPermissions.isEmpty()) {
+                            request.grant(request.getResources());
+                        } else {
+                            pendingMediaRequest = request;
+                            ActivityCompat.requestPermissions(MainActivity.this, neededPermissions.toArray(new String[0]), MEDIA_PERMISSION_REQ_CODE);
                         }
-                        request.grant(request.getResources());
                     } catch (Exception e) {
                         Log.w(TAG, "PermissionRequest grant error: " + e.getMessage());
                     }
@@ -473,11 +493,39 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == MEDIA_PERMISSION_REQ_CODE) {
+            if (pendingMediaRequest != null) {
+                try {
+                    List<String> grantedResources = new ArrayList<>();
+                    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        for (String res : pendingMediaRequest.getResources()) {
+                            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
+                                grantedResources.add(res);
+                            }
+                        }
+                    }
+                    if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                        for (String res : pendingMediaRequest.getResources()) {
+                            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) {
+                                grantedResources.add(res);
+                            }
+                        }
+                    }
+                    if (!grantedResources.isEmpty()) {
+                        pendingMediaRequest.grant(grantedResources.toArray(new String[0]));
+                    } else {
+                        pendingMediaRequest.deny();
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Pending media request error: " + e.getMessage());
+                }
+                pendingMediaRequest = null;
+            }
+            return;
+        }
+
         if (requestCode == PERMISSION_REQ_CODE) {
             startNativeLocationService();
-            if (webView != null) {
-                webView.reload();
-            }
         }
     }
 

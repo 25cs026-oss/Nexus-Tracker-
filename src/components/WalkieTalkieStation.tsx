@@ -98,6 +98,9 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
 
   const handlePttStart = async () => {
     radioAudio.resumeContext();
+    if (typeof window !== 'undefined' && (window as any).NexusNative?.ensureMediaPermissions) {
+      try { (window as any).NexusNative.ensureMediaPermissions(); } catch {}
+    }
     const target = selectedTargetId === 'all' 
       ? undefined 
       : members.find(m => m.id === selectedTargetId);
