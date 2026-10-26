@@ -33,6 +33,18 @@ export interface DeviceMember {
   isApproved?: boolean;
   latestCheckIn?: CheckInPing;
   recentCheckIns?: CheckInPing[];
+  peerId?: string;
+  activeCall?: {
+    callerId: string;
+    callerName: string;
+    callerAvatar?: string;
+    callerRole?: string;
+    targetMemberId: string;
+    type: 'video' | 'radio';
+    status: 'ringing' | 'connected' | 'ended';
+    callerPeerId: string;
+    timestamp: number;
+  } | null;
 }
 
 export interface SafeZone {
@@ -81,5 +93,5 @@ export interface SavedCircleSummary {
   memberName?: string;
 }
 
-export type ActiveTab = 'map' | 'members' | 'places' | 'history' | 'checkins';
+export type ActiveTab = 'map' | 'members' | 'places' | 'history' | 'checkins' | 'radio';
 export type AppTheme = 'light' | 'dark' | 'midnight';

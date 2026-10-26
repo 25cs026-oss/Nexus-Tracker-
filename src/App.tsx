@@ -59,9 +59,12 @@ import { OnboardingModal } from './components/OnboardingModal';
 import { NavigationModal } from './components/NavigationModal';
 import { InstallAppModal } from './components/InstallAppModal';
 import { BackgroundGuideModal } from './components/BackgroundGuideModal';
+import { CommsModal } from './components/CommsModal';
+import { WalkieTalkieStation } from './components/WalkieTalkieStation';
 import { backgroundRunner } from './utils/backgroundRunner';
 import { notificationManager } from './utils/notificationManager';
 import { sirenAudio } from './utils/sirenAudio';
+import { commsManager } from './utils/commsManager';
 
 import { 
   Users, 
@@ -89,6 +92,8 @@ import {
   History,
   Clock,
   X,
+  Send,
+  Video,
   Map as MapIcon
 } from 'lucide-react';
 
@@ -192,7 +197,8 @@ export default function App() {
 
   // Mobile Native App State
   const [mobileSheetExpanded, setMobileSheetExpanded] = useState<boolean>(false);
-  const [mobileTab, setMobileTab] = useState<'members' | 'history' | 'checkins'>('members');
+  const [mobileTab, setMobileTab] = useState<'members' | 'radio' | 'history' | 'checkins'>('members');
+  const [inlineFeedMsg, setInlineFeedMsg] = useState<string>('');
 
   // Pending Join Requests (Host Approval Queue)
   const [pendingJoinRequests, setPendingJoinRequests] = useState<DeviceMember[]>([]);
@@ -228,7 +234,14 @@ export default function App() {
   const [checkIns, setCheckIns] = useState<CheckInPing[]>(() => {
     try {
       const saved = localStorage.getItem('nexus_cached_checkins');
-      return saved ? JSON.parse(saved) : [];
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      // Clean and remove any legacy automated arrival spam
+      const cleaned = Array.isArray(parsed) 
+        ? parsed.filter(c => c && !String(c.id).startsWith('auto_') && !String(c.message).includes('Arrived at') && !String(c.message).includes('Left '))
+        : [];
+      localStorage.setItem('nexus_cached_checkins', JSON.stringify(cleaned));
+      return cleaned;
     } catch {
       return [];
     }
@@ -257,6 +270,7 @@ export default function App() {
   const [showCheckInModal, setShowCheckInModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
+  const [showCommsModal, setShowCommsModal] = useState<boolean>(false);
   const [navigatingMember, setNavigatingMember] = useState<DeviceMember | null>(null);
 
   // PWA & Mobile Installation State
@@ -322,41 +336,6 @@ export default function App() {
 
     if (currentPlace?.name) {
       payload.currentPlace = currentPlace.name;
-    }
-
-    // Auto-detect arrival/departure events for the Family Activity Feed
-    const newPlaceName = currentPlace?.name || null;
-    if (lastPlaceNameRef.current !== undefined && lastPlaceNameRef.current !== newPlaceName) {
-      const prevPlace = lastPlaceNameRef.current;
-      lastPlaceNameRef.current = newPlaceName;
-
-      if (prevPlace !== null || newPlaceName !== null) {
-        const placeMessage = newPlaceName 
-          ? `🏡 Arrived at ${newPlaceName}`
-          : `🚗 Left ${prevPlace}`;
-
-        const autoPing: CheckInPing = {
-          id: `auto_${Date.now()}`,
-          deviceId: memberDocId,
-          memberName: memberName || 'Family Member',
-          avatar: memberAvatar || '👤',
-          message: placeMessage,
-          timestamp: new Date().toISOString()
-        };
-
-        const cleanAutoPing = sanitizeCheckIn(autoPing);
-
-        setCheckIns(prev => {
-          const next = [cleanAutoPing, ...prev.filter(c => c.id !== cleanAutoPing.id)].slice(0, 40);
-          try { localStorage.setItem('nexus_cached_checkins', JSON.stringify(next)); } catch {}
-          return next;
-        });
-
-        seenAlertedCheckInIds.current.add(cleanAutoPing.id);
-        payload.latestCheckIn = cleanAutoPing;
-      }
-    } else if (lastPlaceNameRef.current === undefined) {
-      lastPlaceNameRef.current = newPlaceName;
     }
 
     try {
@@ -808,14 +787,6 @@ export default function App() {
         const data = snap.data() as any;
         if (data.safeZones) setSafeZones(data.safeZones);
 
-        // Real-time Feed Sync from Circle Doc (guaranteed instant delivery across all members)
-        if (data.feed && Array.isArray(data.feed) && data.feed.length > 0) {
-          setCheckIns(data.feed);
-          try {
-            localStorage.setItem('nexus_cached_checkins', JSON.stringify(data.feed.slice(0, 30)));
-          } catch {}
-        }
-
         // Immediate Circle-Level SOS Broadcast Detection
         if (data.activeSos && data.activeSos.memberId !== memberDocId) {
           notificationManager.showSosAlertNotification(data.activeSos.memberName, data.activeSos.place);
@@ -844,22 +815,39 @@ export default function App() {
       for (const m of rawList) {
         if (Array.isArray(m.recentCheckIns)) {
           for (const item of m.recentCheckIns) {
-            if (item && item.id && !seenCheckInIds.has(item.id)) {
+            if (item && item.id && !String(item.id).startsWith('auto_') && !String(item.message).includes('Arrived at') && !String(item.message).includes('Left ') && !seenCheckInIds.has(item.id)) {
               seenCheckInIds.add(item.id);
               aggregatedCheckIns.push(sanitizeCheckIn(item));
             }
           }
         }
-        if (m.latestCheckIn && m.latestCheckIn.id && !seenCheckInIds.has(m.latestCheckIn.id)) {
+        if (m.latestCheckIn && m.latestCheckIn.id && !String(m.latestCheckIn.id).startsWith('auto_') && !String(m.latestCheckIn.message).includes('Arrived at') && !String(m.latestCheckIn.message).includes('Left ') && !seenCheckInIds.has(m.latestCheckIn.id)) {
           seenCheckInIds.add(m.latestCheckIn.id);
           aggregatedCheckIns.push(sanitizeCheckIn(m.latestCheckIn));
+        }
+
+        // Live Comms & Video Call Signaling Detection
+        if (m.activeCall && m.activeCall.targetMemberId === memberDocId) {
+          if (m.activeCall.status === 'ringing') {
+            const ageMs = Date.now() - (m.activeCall.timestamp || 0);
+            if (ageMs < 45000) {
+              commsManager.handleRemoteIncomingCallSignal(m.activeCall);
+              setShowCommsModal(true);
+              notificationManager.showImportantNotification(
+                `📹 Live Video Call: ${m.activeCall.callerName}`,
+                'Incoming call. Tap to answer.'
+              );
+            }
+          } else if (m.activeCall.status === 'ended') {
+            commsManager.handleRemoteCallEnded();
+          }
         }
       }
 
       setCheckIns(prev => {
         const full = [...aggregatedCheckIns];
         for (const item of prev) {
-          if (item && item.id && !seenCheckInIds.has(item.id)) {
+          if (item && item.id && !String(item.id).startsWith('auto_') && !String(item.message).includes('Arrived at') && !String(item.message).includes('Left ') && !seenCheckInIds.has(item.id)) {
             seenCheckInIds.add(item.id);
             full.push(sanitizeCheckIn(item));
           }
@@ -869,7 +857,7 @@ export default function App() {
           const tB = new Date(b.timestamp || 0).getTime();
           return tB - tA;
         });
-        const result = full.slice(0, 40);
+        const result = full.slice(0, 50);
 
         // Notify user if a NEW check-in from another member arrived
         const newest = result[0];
@@ -1001,6 +989,52 @@ export default function App() {
 
     return () => unsubHistory();
   }, [selectedMember?.id, currentCircle?.id, isDemoMode]);
+
+  // Tactical Comms (Walkie-Talkie & Live Video) Initialization
+  useEffect(() => {
+    if (!currentCircle || !deviceId) return;
+    const selfId = `${currentCircle.id}_${deviceId}`;
+    const myMember = members.find(m => m.id === selfId || m.id === 'demo-you') || {
+      id: selfId,
+      name: memberName || 'Family Member',
+      role: memberRole,
+      avatar: memberAvatar,
+      lastLat: currentCoords?.lat || 0,
+      lastLng: currentCoords?.lng || 0,
+      lastUpdated: null,
+      gridId: currentCircle.id
+    };
+    commsManager.initialize(currentCircle.id, myMember, members);
+  }, [currentCircle?.id, deviceId, members, memberName, memberRole, memberAvatar, currentCoords]);
+
+  // Firestore Real-Time Signaling Bridge for Comms & Video Calling
+  useEffect(() => {
+    if (!currentCircle || isDemoMode) return;
+    const memberDocId = `${currentCircle.id}_${deviceId}`;
+    commsManager.setSignalBridge((payload) => {
+      try {
+        setDoc(doc(db, 'devices', memberDocId), {
+          ...payload,
+          lastUpdated: serverTimestamp()
+        }, { merge: true }).catch(() => {});
+      } catch {}
+    });
+    return () => {
+      commsManager.setSignalBridge(null);
+    };
+  }, [currentCircle?.id, deviceId, isDemoMode]);
+
+  // Auto-display Comms Modal on incoming call or session activation
+  useEffect(() => {
+    const unsub = commsManager.subscribe(() => {
+      const incoming = commsManager.getIncomingCall();
+      const session = commsManager.getSession();
+      if (incoming || session) {
+        setShowCommsModal(true);
+      }
+    });
+    return () => unsub();
+  }, []);
 
   // Center on Me Handler
   const handleCenterOnMe = () => {
@@ -1513,32 +1547,42 @@ export default function App() {
     const sender = memberName || 'Family Member';
     const avatar = memberAvatar || '👤';
 
+    const userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat || currentMember?.lastLat || 19.0760;
+    const userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng || currentMember?.lastLng || 72.8777;
+
     const newCheckIn: CheckInPing = {
       id: checkInId,
       deviceId: memberDocId,
       memberName: sender,
       avatar,
       message: cleanMsg,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      lat: userLat,
+      lng: userLng
     };
 
-    if (currentCoords) {
-      newCheckIn.lat = currentCoords.lat;
-      newCheckIn.lng = currentCoords.lng;
-    }
     if (currentPlace?.name) {
       newCheckIn.place = currentPlace.name;
     }
 
     const sanitizedNew = sanitizeCheckIn(newCheckIn);
 
-    // Keep up to 20 past check-ins from this member
-    const myExistingCheckIns = (checkIns || []).filter(c => c.deviceId === memberDocId && c.id !== checkInId);
-    const updatedMemberFeed = [sanitizedNew, ...myExistingCheckIns].slice(0, 20);
+    // Collect all past check-ins for this member from doc & local state
+    const currentMemberDoc = members.find(m => m.id === memberDocId);
+    const existingFromDoc = Array.isArray(currentMemberDoc?.recentCheckIns) ? currentMemberDoc.recentCheckIns : [];
+    const existingFromState = (checkIns || []).filter(c => c.deviceId === memberDocId);
+
+    const existingMap = new Map<string, CheckInPing>();
+    for (const c of [...existingFromDoc, ...existingFromState]) {
+      if (c && c.id && c.id !== checkInId && !String(c.id).startsWith('auto_') && !String(c.message).includes('Arrived at') && !String(c.message).includes('Left ')) {
+        existingMap.set(c.id, sanitizeCheckIn(c));
+      }
+    }
+    const updatedMemberFeed = [sanitizedNew, ...Array.from(existingMap.values())].slice(0, 25);
 
     // Optimistically update full circle feed state
     setCheckIns(prev => {
-      const merged = [sanitizedNew, ...prev.filter(c => c.id !== checkInId)].slice(0, 40);
+      const merged = [sanitizedNew, ...prev.filter(c => c.id !== checkInId)].slice(0, 50);
       try { localStorage.setItem('nexus_cached_checkins', JSON.stringify(merged)); } catch {}
       return merged;
     });
@@ -1551,9 +1595,6 @@ export default function App() {
 
     if (!isDemoMode) {
       try {
-        const userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat || 19.0760;
-        const userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng || 72.8777;
-
         // Save directly to devices collection (100% permitted by security rules)
         await setDoc(doc(db, 'devices', memberDocId), {
           id: memberDocId,
@@ -1573,6 +1614,31 @@ export default function App() {
       }
     }
     setShowCheckInModal(false);
+  };
+
+  // Activity Feed Item Click Handler -> Centering & Selecting Member on Map
+  const handleFeedItemClick = (item: CheckInPing) => {
+    // 1. Flexible match by exact ID, suffix, or trimmed lower-case name
+    const poster = members.find(m => 
+      m.id === item.deviceId ||
+      (item.deviceId && m.id.endsWith(item.deviceId)) ||
+      (item.deviceId && item.deviceId.endsWith(m.id)) ||
+      (m.name && item.memberName && m.name.trim().toLowerCase() === item.memberName.trim().toLowerCase())
+    );
+
+    if (poster && typeof poster.lastLat === 'number' && typeof poster.lastLng === 'number') {
+      setSelectedMember(poster);
+      setMapFocusOverride({ lat: poster.lastLat, lng: poster.lastLng });
+    } else if (typeof item.lat === 'number' && typeof item.lng === 'number') {
+      setMapFocusOverride({ lat: item.lat, lng: item.lng });
+      if (poster) setSelectedMember(poster);
+    } else if (poster) {
+      setSelectedMember(poster);
+    }
+
+    // Collapse sheet on mobile and switch to members map view
+    setMobileSheetExpanded(false);
+    setMobileTab('members');
   };
 
   // Clear history handler
@@ -1710,7 +1776,7 @@ export default function App() {
   const mapFocusTarget = mapFocusOverride || (selectedMember ? { lat: selectedMember.lastLat, lng: selectedMember.lastLng } : currentCoords);
 
   return (
-    <div className="h-[100dvh] overflow-hidden relative lg:h-auto lg:min-h-screen lg:overflow-visible flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 font-sans select-none">
+    <div className="h-[100dvh] overflow-hidden relative lg:h-auto lg:min-h-screen lg:overflow-visible flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 font-sans">
 
       
       {/* 🟢 Status Bar Notification Enable Banner */}
@@ -1891,6 +1957,19 @@ export default function App() {
           >
             <Radio className={`w-3 h-3 ${isTracking ? 'animate-pulse' : ''}`} />
             <span>{gpsStatus === 'active' ? 'Live' : gpsStatus === 'approximate' ? 'City' : 'GPS'}</span>
+          </button>
+
+          {/* Tactical Walkie-Talkie & Video Comms */}
+          <button
+            onClick={() => {
+              setMobileTab('radio');
+              setMobileSheetExpanded(true);
+            }}
+            className="px-2.5 py-1.5 rounded-2xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-[11px] font-bold flex items-center gap-1.5 shadow-md shadow-blue-500/20 transition-all cursor-pointer"
+            title="Tactical Walkie-Talkie & Video Call"
+          >
+            <Radio className="w-3.5 h-3.5 animate-pulse" />
+            <span>Walkie-Talkie</span>
           </button>
 
           {/* SOS Emergency Button */}
@@ -2167,6 +2246,17 @@ export default function App() {
                   Members ({members.length})
                 </button>
                 <button
+                  onClick={() => setMobileTab('radio')}
+                  className={`flex-1 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 ${
+                    mobileTab === 'radio'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'text-blue-600 dark:text-blue-400 font-extrabold'
+                  }`}
+                >
+                  <Radio className="w-3.5 h-3.5 animate-pulse" />
+                  <span>Radio</span>
+                </button>
+                <button
                   onClick={() => setMobileTab('history')}
                   className={`flex-1 py-1.5 rounded-xl text-xs font-bold transition-all ${
                     mobileTab === 'history'
@@ -2257,9 +2347,41 @@ export default function App() {
                         }}
                         onNavigate={(m) => setNavigatingMember(m)}
                         onDelete={(id) => handleDeleteMember(id)}
+                        onOpenRadio={(m) => {
+                          commsManager.openRadio(m);
+                          setShowCommsModal(true);
+                        }}
+                        onStartVideoCall={(m) => {
+                          commsManager.startVideoCall(m);
+                          setShowCommsModal(true);
+                        }}
                       />
                     ))}
                   </>
+                )}
+
+                {mobileTab === 'radio' && (
+                  <div className="h-[460px]">
+                    <WalkieTalkieStation
+                      currentMember={currentMember || {
+                        id: `${currentCircle.id}_${deviceId}`,
+                        name: memberName || 'Family Member',
+                        role: memberRole,
+                        avatar: memberAvatar,
+                        lastLat: currentCoords?.lat || 0,
+                        lastLng: currentCoords?.lng || 0,
+                        lastUpdated: null,
+                        gridId: currentCircle.id
+                      }}
+                      circleName={currentCircle.name}
+                      circlePin={currentCircle.id}
+                      members={members}
+                      onStartVideoCall={(m) => {
+                        commsManager.startVideoCall(m);
+                        setShowCommsModal(true);
+                      }}
+                    />
+                  </div>
                 )}
 
                 {mobileTab === 'history' && (
@@ -2296,22 +2418,76 @@ export default function App() {
                             setSelectedMember(activeSosMember);
                             setShowSosModal(true);
                           }}
-                          className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shrink-0"
+                          className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shrink-0 cursor-pointer"
                         >
                           View
                         </button>
                       </div>
                     )}
 
-                    {/* Live Circle Members Summary */}
+                    {/* Inline Quick Post Form */}
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        if (inlineFeedMsg.trim()) {
+                          handleSendCheckIn(inlineFeedMsg);
+                          setInlineFeedMsg('');
+                        }
+                      }}
+                      className="p-3 bg-indigo-50/70 dark:bg-indigo-950/40 rounded-2xl border border-indigo-100 dark:border-indigo-900/40 flex flex-col gap-2"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg shrink-0">{memberAvatar || '👤'}</span>
+                        <input
+                          type="text"
+                          value={inlineFeedMsg}
+                          onChange={(e) => setInlineFeedMsg(e.target.value)}
+                          placeholder="Post a quick update or check-in..."
+                          className="flex-1 bg-white dark:bg-slate-800 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!inlineFeedMsg.trim()}
+                          className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-sm transition-all cursor-pointer active:scale-95 shrink-0"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>Post</span>
+                        </button>
+                      </div>
+
+                      {/* 1-Tap Presets */}
+                      <div className="flex gap-1.5 overflow-x-auto pb-0.5 text-[11px]">
+                        {['🏡 Arrived Home', '🚗 Heading out', '👍 All good', '🪫 Low battery'].map((msg, i) => (
+                          <button
+                            key={i}
+                            type="button"
+                            onClick={() => handleSendCheckIn(msg)}
+                            className="px-2.5 py-1 rounded-xl bg-white dark:bg-slate-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 whitespace-nowrap transition-colors cursor-pointer active:scale-95 text-[10px] font-medium"
+                          >
+                            {msg}
+                          </button>
+                        ))}
+                      </div>
+                    </form>
+
+                    {/* Live Circle Members Summary (Clickable to Map) */}
                     <div className="p-3 bg-slate-50 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 rounded-2xl">
                       <div className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 flex items-center justify-between">
                         <span>Live Family Status</span>
-                        <span className="text-[10px] text-slate-400 font-normal">{members.length} member{members.length > 1 ? 's' : ''}</span>
+                        <span className="text-[10px] text-blue-600 dark:text-blue-400 font-medium">Tap member to locate ↗</span>
                       </div>
                       <div className="space-y-1.5">
                         {members.map(m => (
-                          <div key={m.id} className="p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2 text-xs">
+                          <div 
+                            key={m.id} 
+                            onClick={() => {
+                              setSelectedMember(m);
+                              setMapFocusOverride({ lat: m.lastLat, lng: m.lastLng });
+                              setMobileSheetExpanded(false);
+                            }}
+                            className="p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2 text-xs hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-950/40 transition-all cursor-pointer"
+                            title={`Click to view ${m.name} on map`}
+                          >
                             <div className="flex items-center gap-2 truncate">
                               <span className="text-sm">{m.avatar || '👤'}</span>
                               <span className="font-bold text-slate-800 dark:text-slate-100 truncate">{m.name}</span>
@@ -2333,47 +2509,36 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Family Updates & Check-ins */}
+                    {/* Family Updates & Check-ins Feed List */}
                     <div className="flex items-center justify-between pb-1.5 border-b border-slate-100 dark:border-slate-800">
-                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">Family Updates & Check-ins</span>
+                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">Recent Activity</span>
                       <button
                         onClick={() => setShowCheckInModal(true)}
-                        className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1 shadow-xs"
+                        className="px-2.5 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 rounded-xl text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
                       >
                         <Plus className="w-3.5 h-3.5" />
-                        <span>Post</span>
+                        <span>All Presets</span>
                       </button>
-                    </div>
-
-                    {/* Quick 1-Tap Presets */}
-                    <div className="flex gap-1.5 overflow-x-auto pb-1 text-[11px]">
-                      {['🏡 Arrived Home', '🚗 Heading out', '👍 All good', '🪫 Low battery'].map((msg, i) => (
-                        <button
-                          key={i}
-                          onClick={() => handleSendCheckIn(msg)}
-                          className="px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-slate-700 dark:text-slate-300 whitespace-nowrap transition-colors"
-                        >
-                          {msg}
-                        </button>
-                      ))}
                     </div>
 
                     {checkIns.length === 0 ? (
                       <div className="text-center py-6 text-xs text-slate-400">
-                        No custom check-ins yet. Tap any preset above or "Post" to share an update!
+                        No custom check-ins yet. Write an update above to share with the family!
                       </div>
                     ) : (
                       checkIns.map((item) => (
                         <div
                           key={item.id}
-                          className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 flex items-start gap-3"
+                          onClick={() => handleFeedItemClick(item)}
+                          className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 flex items-start gap-3 hover:border-indigo-400 dark:hover:border-indigo-600 hover:bg-indigo-50/30 dark:hover:bg-slate-800/80 transition-all cursor-pointer active:scale-[0.99] group shadow-xs"
+                          title="Click to view sender on map"
                         >
-                          <span className="text-xl p-1 bg-white dark:bg-slate-800 rounded-xl shadow-xs">
+                          <span className="text-xl p-1 bg-white dark:bg-slate-800 rounded-xl shadow-xs group-hover:scale-105 transition-transform">
                             {item.avatar || '👤'}
                           </span>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center justify-between">
-                              <span className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                              <span className="text-xs font-bold text-slate-800 dark:text-slate-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
                                 {item.memberName}
                               </span>
                               <span className="text-[10px] text-slate-400">
@@ -2383,6 +2548,18 @@ export default function App() {
                             <p className="text-xs text-slate-700 dark:text-slate-300 mt-0.5">
                               {item.message}
                             </p>
+                            <div className="mt-1.5 flex items-center justify-between gap-1 flex-wrap">
+                              {item.place ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
+                                  <MapPin className="w-3 h-3" />
+                                  {item.place}
+                                </span>
+                              ) : <span />}
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 text-[10px] font-bold group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                                <Navigation className="w-2.5 h-2.5" />
+                                <span>Locate on Map</span>
+                              </span>
+                            </div>
                           </div>
                         </div>
                       ))
@@ -2427,6 +2604,22 @@ export default function App() {
                   {members.length}
                 </span>
               )}
+            </button>
+
+            {/* Walkie-Talkie Tab */}
+            <button
+              onClick={() => {
+                setMobileTab('radio');
+                setMobileSheetExpanded(true);
+              }}
+              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl transition-all ${
+                mobileSheetExpanded && mobileTab === 'radio'
+                  ? 'text-blue-600 dark:text-blue-400 font-bold scale-105'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
+              }`}
+            >
+              <Radio className="w-4 h-4 text-blue-500 animate-pulse" />
+              <span className="text-[10px] font-bold">Radio</span>
             </button>
 
             {/* Timeline Tab */}
@@ -2673,6 +2866,16 @@ export default function App() {
               <span className="hidden sm:inline">Places</span>
             </button>
 
+            {/* Tactical Comms (Walkie-Talkie / Video) */}
+            <button
+              onClick={() => setActiveTab('radio')}
+              className="p-2 sm:px-3 sm:py-2 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs active:scale-95 cursor-pointer"
+              title="Tactical Walkie-Talkie & Video Comms"
+            >
+              <Radio className="w-4 h-4 animate-pulse" />
+              <span className="hidden sm:inline">Walkie-Talkie</span>
+            </button>
+
             {/* SOS Emergency */}
             <button
               onClick={() => setShowSosModal(true)}
@@ -2827,6 +3030,14 @@ export default function App() {
               currentCoords={currentCoords}
               accuracy={gpsAccuracy}
               currentUser={currentMember}
+              onOpenRadio={(m) => {
+                commsManager.openRadio(m);
+                setShowCommsModal(true);
+              }}
+              onStartVideoCall={(m) => {
+                commsManager.startVideoCall(m);
+                setShowCommsModal(true);
+              }}
             />
           </div>
         </div>
@@ -2844,6 +3055,17 @@ export default function App() {
               }`}
             >
               Members ({members.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('radio')}
+              className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 ${
+                activeTab === 'radio'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'text-blue-600 dark:text-blue-400 hover:text-blue-700 font-extrabold'
+              }`}
+            >
+              <Radio className="w-3.5 h-3.5 animate-pulse" />
+              <span>Walkie-Talkie</span>
             </button>
             <button
               onClick={() => setActiveTab('history')}
@@ -2866,6 +3088,29 @@ export default function App() {
               Feed ({checkIns.length})
             </button>
           </div>
+
+          {/* Dedicated Walkie-Talkie Station Tab */}
+          {activeTab === 'radio' && (
+            <WalkieTalkieStation
+              currentMember={currentMember || {
+                id: `${currentCircle.id}_${deviceId}`,
+                name: memberName || 'Family Member',
+                role: memberRole,
+                avatar: memberAvatar,
+                lastLat: currentCoords?.lat || 0,
+                lastLng: currentCoords?.lng || 0,
+                lastUpdated: null,
+                gridId: currentCircle.id
+              }}
+              circleName={currentCircle.name}
+              circlePin={currentCircle.id}
+              members={members}
+              onStartVideoCall={(m) => {
+                commsManager.startVideoCall(m);
+                setShowCommsModal(true);
+              }}
+            />
+          )}
 
           {/* Members List */}
           {(activeTab === 'members' || activeTab === 'map') && (
@@ -2939,6 +3184,14 @@ export default function App() {
                     }}
                     onNavigate={(m) => setNavigatingMember(m)}
                     onDelete={(id) => handleDeleteMember(id)}
+                    onOpenRadio={(m) => {
+                      commsManager.openRadio(m);
+                      setShowCommsModal(true);
+                    }}
+                    onStartVideoCall={(m) => {
+                      commsManager.startVideoCall(m);
+                      setShowCommsModal(true);
+                    }}
                   />
                 ))
               )}
@@ -2973,21 +3226,66 @@ export default function App() {
 
           {/* Check-ins Feed */}
           {activeTab === 'checkins' && (
-            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 flex flex-col h-full max-h-[580px] shadow-xs">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 flex flex-col h-full max-h-[580px] shadow-xs select-text">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
                 <h4 className="font-bold text-slate-800 dark:text-slate-100 text-sm">
                   Family Activity Feed
                 </h4>
                 <button
                   onClick={() => setShowCheckInModal(true)}
-                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1 shadow-xs"
+                  className="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 rounded-xl text-xs font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>Post</span>
+                  <span>All Presets</span>
                 </button>
               </div>
 
-              <div className="flex-1 overflow-y-auto mt-3 space-y-3 pr-1">
+              {/* Inline Fast Post Box */}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (inlineFeedMsg.trim()) {
+                    handleSendCheckIn(inlineFeedMsg);
+                    setInlineFeedMsg('');
+                  }
+                }}
+                className="mt-3 p-3 bg-indigo-50/70 dark:bg-indigo-950/40 rounded-2xl border border-indigo-100 dark:border-indigo-900/40 flex flex-col gap-2 shrink-0 select-text"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-lg shrink-0">{memberAvatar || '👤'}</span>
+                  <input
+                    type="text"
+                    value={inlineFeedMsg}
+                    onChange={(e) => setInlineFeedMsg(e.target.value)}
+                    placeholder="Post a status update or check-in to family..."
+                    className="flex-1 bg-white dark:bg-slate-800 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 select-text"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!inlineFeedMsg.trim()}
+                    className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-sm transition-all cursor-pointer active:scale-95 shrink-0"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Post</span>
+                  </button>
+                </div>
+
+                {/* 1-Tap Presets */}
+                <div className="flex gap-1.5 overflow-x-auto pb-0.5 text-[11px]">
+                  {['🏡 Arrived Home', '🚗 Heading out', '👍 All good', '🪫 Low battery'].map((msg, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => handleSendCheckIn(msg)}
+                      className="px-2.5 py-1 rounded-xl bg-white dark:bg-slate-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 whitespace-nowrap transition-colors cursor-pointer active:scale-95 text-[10px] font-medium"
+                    >
+                      {msg}
+                    </button>
+                  ))}
+                </div>
+              </form>
+
+              <div className="flex-1 overflow-y-auto mt-2 space-y-3 pr-1">
                 {/* Emergency SOS Banner in Feed */}
                 {activeSosMember && (
                   <div className="p-3 bg-rose-500/15 border-2 border-rose-500/40 rounded-2xl flex items-center justify-between gap-2 text-rose-600 dark:text-rose-400 animate-pulse">
@@ -3005,22 +3303,30 @@ export default function App() {
                         setSelectedMember(activeSosMember);
                         setShowSosModal(true);
                       }}
-                      className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shrink-0"
+                      className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shrink-0 cursor-pointer"
                     >
                       View
                     </button>
                   </div>
                 )}
 
-                {/* Live Circle Members Summary */}
+                {/* Live Circle Members Summary (Clickable to Map) */}
                 <div className="p-3 bg-slate-50 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 rounded-2xl">
                   <div className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 flex items-center justify-between">
                     <span>Live Family Status</span>
-                    <span className="text-[10px] text-slate-400 font-normal">{members.length} member{members.length > 1 ? 's' : ''}</span>
+                    <span className="text-[10px] text-blue-600 dark:text-blue-400 font-medium">Click member to locate ↗</span>
                   </div>
                   <div className="space-y-1.5">
                     {members.map(m => (
-                      <div key={m.id} className="p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2 text-xs">
+                      <div 
+                        key={m.id} 
+                        onClick={() => {
+                          setSelectedMember(m);
+                          setMapFocusOverride({ lat: m.lastLat, lng: m.lastLng });
+                        }}
+                        className="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2 text-xs hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-950/40 transition-all cursor-pointer"
+                        title={`Click to view ${m.name} on map`}
+                      >
                         <div className="flex items-center gap-2 truncate">
                           <span className="text-sm">{m.avatar || '👤'}</span>
                           <span className="font-bold text-slate-800 dark:text-slate-100 truncate">{m.name}</span>
@@ -3042,48 +3348,53 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Quick 1-Tap Presets */}
-                <div className="flex gap-1.5 overflow-x-auto pb-1 text-[11px]">
-                  {['🏡 Arrived Home', '🚗 Heading out', '👍 All good', '🪫 Low battery'].map((msg, i) => (
-                    <button
-                      key={i}
-                      onClick={() => handleSendCheckIn(msg)}
-                      className="px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-slate-700 dark:text-slate-300 whitespace-nowrap transition-colors"
-                    >
-                      {msg}
-                    </button>
-                  ))}
-                </div>
-
-                {checkIns.length === 0 ? (
-                  <div className="text-center py-6 text-xs text-slate-400">
-                    No custom check-in messages yet. Tap any preset above or "Post" to share an update!
-                  </div>
-                ) : (
-                  checkIns.map((item) => (
-                    <div
-                      key={item.id}
-                      className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 flex items-start gap-3"
-                    >
-                      <span className="text-xl p-1 bg-white dark:bg-slate-800 rounded-xl shadow-xs">
-                        {item.avatar || '👤'}
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-bold text-slate-800 dark:text-slate-100">
-                            {item.memberName}
-                          </span>
-                          <span className="text-[10px] text-slate-400">
-                            {formatRelativeTime(item.timestamp)}
-                          </span>
-                        </div>
-                        <p className="text-xs text-slate-700 dark:text-slate-300 mt-0.5">
-                          {item.message}
-                        </p>
-                      </div>
+                {/* Check-ins Feed List (Clickable to Map) */}
+                <div className="space-y-2">
+                  <span className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">Recent Check-in Messages</span>
+                  {checkIns.length === 0 ? (
+                    <div className="text-center py-6 text-xs text-slate-400">
+                      No custom check-in messages yet. Use the quick box above to post!
                     </div>
-                  ))
-                )}
+                  ) : (
+                    checkIns.map((item) => (
+                      <div
+                        key={item.id}
+                        onClick={() => handleFeedItemClick(item)}
+                        className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 flex items-start gap-3 hover:border-indigo-400 dark:hover:border-indigo-600 hover:bg-indigo-50/30 dark:hover:bg-slate-800/80 transition-all cursor-pointer active:scale-[0.99] group shadow-xs"
+                        title="Click to view sender on map"
+                      >
+                        <span className="text-xl p-1 bg-white dark:bg-slate-800 rounded-xl shadow-xs group-hover:scale-105 transition-transform">
+                          {item.avatar || '👤'}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-800 dark:text-slate-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                              {item.memberName}
+                            </span>
+                            <span className="text-[10px] text-slate-400">
+                              {formatRelativeTime(item.timestamp)}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-700 dark:text-slate-300 mt-0.5">
+                            {item.message}
+                          </p>
+                          <div className="mt-1.5 flex items-center justify-between gap-1 flex-wrap">
+                            {item.place ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
+                                <MapPin className="w-3 h-3" />
+                                {item.place}
+                              </span>
+                            ) : <span />}
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 text-[10px] font-bold group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                              <Navigation className="w-2.5 h-2.5" />
+                              <span>Locate on Map</span>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -3164,6 +3475,26 @@ export default function App() {
         deferredPrompt={deferredPrompt}
         onInstallSuccess={() => setIsAppInstalled(true)}
       />
+
+      {/* Tactical Comms Modal (Walkie-Talkie & Live Video Call) */}
+      {currentCircle && (
+        <CommsModal
+          isOpen={showCommsModal}
+          onClose={() => setShowCommsModal(false)}
+          currentMember={currentMember || {
+            id: `${currentCircle.id}_${deviceId}`,
+            name: memberName || 'Family Member',
+            role: memberRole,
+            avatar: memberAvatar,
+            lastLat: currentCoords?.lat || 0,
+            lastLng: currentCoords?.lng || 0,
+            lastUpdated: null,
+            gridId: currentCircle.id
+          }}
+          circleName={currentCircle.name}
+          members={members}
+        />
+      )}
     </div>
   );
 }

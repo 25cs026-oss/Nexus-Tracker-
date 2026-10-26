@@ -24,6 +24,7 @@ import androidx.core.app.NotificationCompat;
 import android.webkit.ConsoleMessage;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -214,6 +215,34 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
                 callback.invoke(origin, true, false);
+            }
+
+            @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                runOnUiThread(() -> {
+                    try {
+                        List<String> neededPermissions = new ArrayList<>();
+                        for (String res : request.getResources()) {
+                            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
+                                if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                    neededPermissions.add(Manifest.permission.RECORD_AUDIO);
+                                }
+                            }
+                            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) {
+                                if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                                    neededPermissions.add(Manifest.permission.CAMERA);
+                                }
+                            }
+                        }
+
+                        if (!neededPermissions.isEmpty()) {
+                            ActivityCompat.requestPermissions(MainActivity.this, neededPermissions.toArray(new String[0]), PERMISSION_REQ_CODE);
+                        }
+                        request.grant(request.getResources());
+                    } catch (Exception e) {
+                        Log.w(TAG, "PermissionRequest grant error: " + e.getMessage());
+                    }
+                });
             }
 
             @Override
@@ -410,6 +439,12 @@ public class MainActivity extends AppCompatActivity {
         }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.RECORD_AUDIO);
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.CAMERA);
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {

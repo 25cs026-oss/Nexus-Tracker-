@@ -13,7 +13,9 @@ import {
   Navigation, 
   MapPin, 
   AlertTriangle,
-  Trash2
+  Trash2,
+  Radio,
+  Video
 } from 'lucide-react';
 
 interface FamilyMemberCardProps {
@@ -25,6 +27,8 @@ interface FamilyMemberCardProps {
   onSelect: (member: DeviceMember) => void;
   onNavigate?: (member: DeviceMember) => void;
   onDelete?: (memberId: string) => void;
+  onOpenRadio?: (member: DeviceMember) => void;
+  onStartVideoCall?: (member: DeviceMember) => void;
 }
 
 export const FamilyMemberCard: React.FC<FamilyMemberCardProps> = ({
@@ -35,7 +39,9 @@ export const FamilyMemberCard: React.FC<FamilyMemberCardProps> = ({
   isCurrentUserOwner,
   onSelect,
   onNavigate,
-  onDelete
+  onDelete,
+  onOpenRadio,
+  onStartVideoCall
 }) => {
   const isSelf = currentUser?.id === member.id;
   
@@ -170,7 +176,35 @@ export const FamilyMemberCard: React.FC<FamilyMemberCardProps> = ({
             );
           })()}
 
-          <div className="flex items-center gap-1 mt-2.5">
+          <div className="flex items-center gap-1.5 mt-2.5">
+            {onOpenRadio && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenRadio(member);
+                }}
+                className="px-2 py-1 rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900 text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                title={isSelf ? 'Open Walkie-Talkie Radio' : `Walkie-Talkie Radio with ${member.name}`}
+              >
+                <Radio className="w-3.5 h-3.5" />
+                <span>Radio</span>
+              </button>
+            )}
+
+            {!isSelf && onStartVideoCall && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onStartVideoCall(member);
+                }}
+                className="px-2 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900 text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                title={`Live Video Call ${member.name}`}
+              >
+                <Video className="w-3.5 h-3.5" />
+                <span>Video</span>
+              </button>
+            )}
+
             {onNavigate && (
               <button
                 onClick={(e) => {

@@ -20,7 +20,9 @@ import {
   Battery, 
   BatteryCharging, 
   AlertTriangle,
-  MapPin
+  MapPin,
+  Radio,
+  Video
 } from 'lucide-react';
 
 interface MapProps {
@@ -36,6 +38,8 @@ interface MapProps {
   currentCoords?: { lat: number; lng: number } | null;
   accuracy?: number;
   currentUser?: DeviceMember | null;
+  onOpenRadio?: (member: DeviceMember) => void;
+  onStartVideoCall?: (member: DeviceMember) => void;
 }
 
 // Tile Layer Providers
@@ -230,7 +234,9 @@ export const Map: React.FC<MapProps> = ({
   focusLocation,
   currentCoords,
   accuracy,
-  currentUser
+  currentUser,
+  onOpenRadio,
+  onStartVideoCall
 }) => {
   const [activeLayer, setActiveLayer] = useState<'streets' | 'satellite' | 'dark'>('streets');
   const [showLayerMenu, setShowLayerMenu] = useState(false);
@@ -426,17 +432,43 @@ export const Map: React.FC<MapProps> = ({
                     </div>
                   </div>
 
-                  {/* Fast Directions Button */}
-                  <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  {/* Fast Comms & Directions Buttons */}
+                  <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center gap-1.5">
+                    {onOpenRadio && !isCurrentUser && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenRadio(member);
+                        }}
+                        className="p-1.5 px-2 bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 hover:bg-blue-100 transition-colors"
+                        title="Walkie-Talkie Radio"
+                      >
+                        <Radio className="w-3.5 h-3.5" />
+                        <span>Radio</span>
+                      </button>
+                    )}
+                    {onStartVideoCall && !isCurrentUser && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onStartVideoCall(member);
+                        }}
+                        className="p-1.5 px-2 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 hover:bg-emerald-100 transition-colors"
+                        title="Video Call"
+                      >
+                        <Video className="w-3.5 h-3.5" />
+                        <span>Video</span>
+                      </button>
+                    )}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
                         onNavigateMember(member);
                       }}
-                      className="w-full py-1.5 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-xs"
+                      className="flex-1 py-1.5 px-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition-colors shadow-xs"
                     >
                       <Navigation className="w-3.5 h-3.5" />
-                      <span>Get Directions</span>
+                      <span>Directions</span>
                     </button>
                   </div>
                 </div>
