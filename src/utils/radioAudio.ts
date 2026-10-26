@@ -241,6 +241,16 @@ class RadioAudioEngine {
   }
 
   /**
+   * Resume AudioContext on any user interaction (satisfies browser Autoplay policies)
+   */
+  public resumeContext() {
+    const ctx = this.getContext();
+    if (ctx && ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+  }
+
+  /**
    * Call Ended / Busy Tone
    */
   public playCallEndTone() {
@@ -272,3 +282,17 @@ class RadioAudioEngine {
 }
 
 export const radioAudio = new RadioAudioEngine();
+
+if (typeof window !== 'undefined') {
+  const unlockAudioContext = () => {
+    radioAudio.resumeContext();
+    window.removeEventListener('click', unlockAudioContext);
+    window.removeEventListener('touchstart', unlockAudioContext);
+    window.removeEventListener('keydown', unlockAudioContext);
+    window.removeEventListener('pointerdown', unlockAudioContext);
+  };
+  window.addEventListener('click', unlockAudioContext, { passive: true, once: true });
+  window.addEventListener('touchstart', unlockAudioContext, { passive: true, once: true });
+  window.addEventListener('keydown', unlockAudioContext, { passive: true, once: true });
+  window.addEventListener('pointerdown', unlockAudioContext, { passive: true, once: true });
+}

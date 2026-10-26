@@ -539,17 +539,13 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                 <div className="flex flex-col items-center">
                   <button
                     ref={pttButtonRef}
-                    onMouseDown={() => commsManager.pressPtt()}
-                    onMouseUp={() => commsManager.releasePtt()}
-                    onTouchStart={(e) => {
-                      e.preventDefault();
+                    onPointerDown={() => {
+                      radioAudio.resumeContext();
                       commsManager.pressPtt();
                     }}
-                    onTouchEnd={(e) => {
-                      e.preventDefault();
-                      commsManager.releasePtt();
-                    }}
-                    className={`relative w-40 h-40 sm:w-48 sm:h-48 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-2xl ${
+                    onPointerUp={() => commsManager.releasePtt()}
+                    onPointerCancel={() => commsManager.releasePtt()}
+                    className={`relative w-40 h-40 sm:w-48 sm:h-48 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-2xl touch-none ${
                       isPttPressed
                         ? 'bg-gradient-to-b from-red-600 to-red-700 text-white ring-8 ring-red-500/30 shadow-red-600/50'
                         : 'bg-gradient-to-b from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white ring-8 ring-blue-500/20 shadow-blue-600/30'

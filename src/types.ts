@@ -45,6 +45,13 @@ export interface DeviceMember {
     callerPeerId: string;
     timestamp: number;
   } | null;
+  radioBurst?: {
+    senderId: string;
+    senderName: string;
+    audioData: string;
+    timestamp: number;
+    targetMemberId?: string;
+  } | null;
 }
 
 export interface SafeZone {

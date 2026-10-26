@@ -247,6 +247,7 @@ export default function App() {
     }
   });
   const seenAlertedCheckInIds = useRef<Set<string>>(new Set());
+  const seenRadioBurstTimestamps = useRef<Set<number>>(new Set());
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [weather, setWeather] = useState<{ temp: number; condition: string } | null>(null);
 
@@ -840,6 +841,18 @@ export default function App() {
             }
           } else if (m.activeCall.status === 'ended') {
             commsManager.handleRemoteCallEnded();
+          }
+        }
+
+        // Live Walkie-Talkie Voice Burst Reception
+        if (m.radioBurst && m.radioBurst.senderId !== memberDocId) {
+          const burstTime = m.radioBurst.timestamp || 0;
+          const ageMs = Date.now() - burstTime;
+          if (ageMs < 25000 && !seenRadioBurstTimestamps.current.has(burstTime)) {
+            seenRadioBurstTimestamps.current.add(burstTime);
+            if (!m.radioBurst.targetMemberId || m.radioBurst.targetMemberId === 'all' || m.radioBurst.targetMemberId === memberDocId) {
+              commsManager.playRadioAudioBurst(m.radioBurst.audioData, m.radioBurst.senderName);
+            }
           }
         }
       }

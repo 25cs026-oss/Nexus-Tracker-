@@ -55,16 +55,35 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
     return () => unsub();
   }, []);
 
+  // Global pointer release listener (guarantees PTT stops even if released outside button)
+  useEffect(() => {
+    const handleGlobalRelease = () => {
+      if (commsManager.isPttActive()) {
+        handlePttEnd();
+      }
+    };
+    window.addEventListener('pointerup', handleGlobalRelease);
+    window.addEventListener('mouseup', handleGlobalRelease);
+    window.addEventListener('touchend', handleGlobalRelease);
+    return () => {
+      window.removeEventListener('pointerup', handleGlobalRelease);
+      window.removeEventListener('mouseup', handleGlobalRelease);
+      window.removeEventListener('touchend', handleGlobalRelease);
+    };
+  }, []);
+
   // Keyboard spacebar listener for PTT
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !e.repeat && document.activeElement?.tagName !== 'INPUT') {
+      const tag = document.activeElement?.tagName || '';
+      if (e.code === 'Space' && !e.repeat && !['INPUT', 'TEXTAREA'].includes(tag)) {
         e.preventDefault();
         handlePttStart();
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && document.activeElement?.tagName !== 'INPUT') {
+      const tag = document.activeElement?.tagName || '';
+      if (e.code === 'Space' && !['INPUT', 'TEXTAREA'].includes(tag)) {
         e.preventDefault();
         handlePttEnd();
       }
@@ -78,6 +97,7 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
   }, [selectedTargetId, members]);
 
   const handlePttStart = async () => {
+    radioAudio.resumeContext();
     const target = selectedTargetId === 'all' 
       ? undefined 
       : members.find(m => m.id === selectedTargetId);
@@ -208,11 +228,10 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
         {/* THE BIG PUSH-TO-TALK BUTTON */}
         <button
           type="button"
-          onMouseDown={handlePttStart}
-          onMouseUp={handlePttEnd}
-          onTouchStart={(e) => { e.preventDefault(); handlePttStart(); }}
-          onTouchEnd={(e) => { e.preventDefault(); handlePttEnd(); }}
-          className={`relative w-40 h-40 sm:w-44 sm:h-44 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-2xl ${
+          onPointerDown={handlePttStart}
+          onPointerUp={handlePttEnd}
+          onPointerCancel={handlePttEnd}
+          className={`relative w-40 h-40 sm:w-44 sm:h-44 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-2xl touch-none ${
             isPttPressed
               ? 'bg-gradient-to-b from-red-600 to-red-700 text-white ring-8 ring-red-500/30 shadow-red-600/50 scale-102'
               : 'bg-gradient-to-b from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white ring-8 ring-blue-500/20 shadow-blue-600/30'

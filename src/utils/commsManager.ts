@@ -1,14 +1,14 @@
 /**
  * Nexus Tactical Comms Engine (Walkie-Talkie & Live Video Calling)
  * 
- * Powered by WebRTC & PeerJS with Firestore real-time signaling bridge.
+ * Powered by WebRTC, PeerJS & Firestore Hybrid Signaling.
  * Features:
- * - Direct P2P audio/video streaming across cities (e.g. Nadiad ⇄ Surat) and local LAN.
+ * - Dual-Engine Walkie-Talkie: Real-time Opus WebRTC streaming + instant voice burst packets.
  * - Hardware Echo Cancellation, Noise Suppression & Auto Gain Control.
- * - Walkie-Talkie Push-to-Talk (PTT) with instant audio streaming and tactical roger beeps.
+ * - Walkie-Talkie Push-to-Talk (PTT) with instant audio streaming, squelch chirps & roger beeps.
  * - HD Live Video Calling with front/back camera toggling and Picture-in-Picture (PIP).
- * - 5-Stage Progressive Media Fallback: Guarantees calls NEVER cut even if camera is missing, busy, or blocked.
- * - Firestore Signaling Bridge: Ensures calls ring and notify even if PeerJS socket is sleeping.
+ * - 5-Stage Progressive Media Fallback: Guarantees calls & radio NEVER cut.
+ * - Firestore Signaling Bridge: Instant audio delivery across cities and carrier networks.
  * - Automatic Peer ID Collision recovery and multiple redundant STUN servers.
  */
 
@@ -55,6 +55,13 @@ export type SignalBridgeHandler = (data: {
     callerPeerId: string;
     timestamp: number;
   } | null;
+  radioBurst?: {
+    senderId: string;
+    senderName: string;
+    audioData: string;
+    timestamp: number;
+    targetMemberId?: string;
+  } | null;
 }) => void;
 
 export class CommsManager {
@@ -64,12 +71,14 @@ export class CommsManager {
   private currentMember: DeviceMember | null = null;
   private membersList: DeviceMember[] = [];
 
-  // Active Media Streams
+  // Active Media Streams & Recorders
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
   private activeMediaConnection: MediaConnection | null = null;
   private broadcastMediaConnections: Map<string, MediaConnection> = new Map();
   private dataConnections: Map<string, DataConnection> = new Map();
+  private mediaRecorder: MediaRecorder | null = null;
+  private pttRecordedChunks: Blob[] = [];
 
   // Comms State
   private session: ActiveCommsSession | null = null;
@@ -90,17 +99,40 @@ export class CommsManager {
 
   constructor() {
     if (typeof window !== 'undefined') {
+      this.ensureAudioElementReady();
+    }
+  }
+
+  private ensureAudioElementReady(): HTMLAudioElement {
+    if (!this.remoteAudioElement && typeof document !== 'undefined') {
       try {
         this.remoteAudioElement = document.createElement('audio');
         this.remoteAudioElement.autoplay = true;
         this.remoteAudioElement.setAttribute('playsinline', 'true');
         this.remoteAudioElement.style.display = 'none';
-        document.body.appendChild(this.remoteAudioElement);
+        if (document.body) {
+          document.body.appendChild(this.remoteAudioElement);
+        } else {
+          document.addEventListener('DOMContentLoaded', () => {
+            if (this.remoteAudioElement && document.body && !document.body.contains(this.remoteAudioElement)) {
+              document.body.appendChild(this.remoteAudioElement);
+            }
+          });
+        }
       } catch {
         this.remoteAudioElement = new Audio();
         this.remoteAudioElement.autoplay = true;
       }
     }
+    return this.remoteAudioElement as HTMLAudioElement;
+  }
+
+  public getOrCreateAudioElement(): HTMLAudioElement {
+    const el = this.ensureAudioElementReady();
+    if (typeof document !== 'undefined' && document.body && el && !document.body.contains(el)) {
+      try { document.body.appendChild(el); } catch {}
+    }
+    return el;
   }
 
   public setSignalBridge(bridge: SignalBridgeHandler | null) {
@@ -262,7 +294,6 @@ export class CommsManager {
 
   /**
    * Handle incoming call triggered via Firestore real-time signaling.
-   * Ensures instant ringing even if WebSockets are sleeping or on mobile.
    */
   public handleRemoteIncomingCallSignal(callData: {
     callerId: string;
@@ -355,26 +386,21 @@ export class CommsManager {
       };
       this.notify();
     } else {
-      // Tactical Walkie-Talkie Radio -> Auto-receive and patch audio through
+      // Tactical Walkie-Talkie Radio -> Auto-receive and patch audio through immediately!
       radioAudio.playPttStartChirp();
       this.remoteSpeakerName = meta.callerName || 'Tactical Radio';
       this.isRemoteSpeaking = true;
 
-      navigator.mediaDevices?.getUserMedia({ audio: true, video: false })
-        .then(stream => {
-          stream.getAudioTracks().forEach(t => { t.enabled = false; });
-          call.answer(stream);
-        })
-        .catch(() => {
-          call.answer();
-        });
+      // Answer immediately in receive-only mode (NEVER wait for mic getUserMedia!)
+      try {
+        call.answer();
+      } catch {}
 
       call.on('stream', (remoteMediaStream) => {
         this.remoteStream = remoteMediaStream;
-        if (this.remoteAudioElement) {
-          this.remoteAudioElement.srcObject = remoteMediaStream;
-          this.remoteAudioElement.play().catch(() => {});
-        }
+        const audio = this.getOrCreateAudioElement();
+        audio.srcObject = remoteMediaStream;
+        audio.play().catch(() => {});
         this.notify();
       });
 
@@ -390,11 +416,12 @@ export class CommsManager {
   }
 
   /**
-   * Handle incoming DataConnection for Walkie-Talkie PTT signaling.
+   * Handle incoming DataConnection for Walkie-Talkie PTT signaling & voice bursts.
    */
   private handleDataConnection(conn: DataConnection) {
     conn.on('data', (data: any) => {
       if (typeof data !== 'object' || !data) return;
+
       if (data.type === 'PTT_START') {
         this.remoteSpeakerName = data.callerName || 'Member';
         this.isRemoteSpeaking = true;
@@ -404,17 +431,68 @@ export class CommsManager {
         radioAudio.playRogerBeep();
         this.isRemoteSpeaking = false;
         this.notify();
+      } else if (data.type === 'RADIO_VOICE_BURST' && data.audioData) {
+        this.playRadioAudioBurst(data.audioData, data.senderName || 'Radio Unit');
       }
     });
   }
 
   /**
+   * Play an incoming high-fidelity radio voice transmission packet.
+   */
+  public playRadioAudioBurst(audioData: string, senderName: string) {
+    if (!audioData) return;
+    this.remoteSpeakerName = senderName;
+    this.isRemoteSpeaking = true;
+    radioAudio.playPttStartChirp();
+    this.notify();
+
+    const audio = this.getOrCreateAudioElement();
+    audio.srcObject = null;
+    audio.src = audioData;
+    audio.play()
+      .then(() => {
+        audio.onended = () => {
+          radioAudio.playRogerBeep();
+          this.isRemoteSpeaking = false;
+          this.remoteSpeakerName = null;
+          this.notify();
+        };
+      })
+      .catch((err) => {
+        console.warn('Audio burst play note:', err);
+        setTimeout(() => {
+          radioAudio.playRogerBeep();
+          this.isRemoteSpeaking = false;
+          this.remoteSpeakerName = null;
+          this.notify();
+        }, 1200);
+      });
+  }
+
+  private sendDataToMember(member: DeviceMember, data: any) {
+    const remotePeerId = member.peerId || this.getPeerIdForMember(member.id);
+    if (!this.peer || this.peer.destroyed) return;
+
+    let conn = this.dataConnections.get(remotePeerId);
+    if (!conn || !conn.open) {
+      try {
+        conn = this.peer.connect(remotePeerId, { reliable: true });
+        this.dataConnections.set(remotePeerId, conn);
+        conn.on('open', () => {
+          conn?.send(data);
+        });
+        conn.on('error', () => {});
+      } catch {}
+    } else {
+      try {
+        conn.send(data);
+      } catch {}
+    }
+  }
+
+  /**
    * Acquire local camera & microphone streams with 5-stage progressive fallback.
-   * GUARANTEES that video/voice calls NEVER crash or get cut even if:
-   * - Device has no webcam (desktop PC)
-   * - Webcam is busy / in use by another app (Zoom, Teams)
-   * - Camera permission is blocked in browser settings
-   * - Microphone is blocked
    */
   private async getLocalMedia(isVideo: boolean, facingMode: 'user' | 'environment' = 'user'): Promise<MediaStream> {
     this.permissionWarning = null;
@@ -579,41 +657,60 @@ export class CommsManager {
     if (this.isPttPressed) return;
     this.isPttPressed = true;
     radioAudio.playPttStartChirp();
+    this.pttRecordedChunks = [];
 
     try {
       const stream = await this.getLocalMedia(false);
       stream.getAudioTracks().forEach(t => { t.enabled = true; });
 
+      // Start MediaRecorder for voice burst delivery
+      if (typeof MediaRecorder !== 'undefined') {
+        let options: any = {};
+        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+          options = { mimeType: 'audio/webm;codecs=opus' };
+        } else if (MediaRecorder.isTypeSupported('audio/webm')) {
+          options = { mimeType: 'audio/webm' };
+        } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+          options = { mimeType: 'audio/mp4' };
+        }
+
+        try {
+          this.mediaRecorder = new MediaRecorder(stream, options);
+          this.mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) {
+              this.pttRecordedChunks.push(e.data);
+            }
+          };
+          this.mediaRecorder.start(100);
+        } catch (recErr) {
+          console.warn('MediaRecorder start note:', recErr);
+        }
+      }
+
+      // Signal target peers about PTT transmission starting
       const targets = this.session?.targetMember
         ? [this.session.targetMember]
         : this.membersList.filter(m => m.id !== this.currentMember?.id);
 
       targets.forEach(member => {
+        this.sendDataToMember(member, {
+          type: 'PTT_START',
+          callerName: this.currentMember?.name || 'Radio Unit'
+        });
+
         const remotePeerId = member.peerId || this.getPeerIdForMember(member.id);
-        if (!this.peer || this.peer.destroyed) return;
-
-        try {
-          const conn = this.peer.connect(remotePeerId);
-          conn.on('open', () => {
-            conn.send({
-              type: 'PTT_START',
-              callerName: this.currentMember?.name || 'Radio Unit'
+        if (this.peer && !this.peer.destroyed) {
+          try {
+            const call = this.peer.call(remotePeerId, stream, {
+              metadata: {
+                type: 'radio',
+                callerId: this.currentMember?.id,
+                callerName: this.currentMember?.name || 'Radio Unit',
+                callerAvatar: this.currentMember?.avatar
+              }
             });
-          });
-        } catch {}
-
-        try {
-          const call = this.peer.call(remotePeerId, stream, {
-            metadata: {
-              type: 'radio',
-              callerId: this.currentMember?.id,
-              callerName: this.currentMember?.name || 'Radio Unit',
-              callerAvatar: this.currentMember?.avatar
-            }
-          });
-          this.broadcastMediaConnections.set(member.id, call);
-        } catch (e) {
-          console.warn('Call transmit failed for:', member.name, e);
+            this.broadcastMediaConnections.set(member.id, call);
+          } catch {}
         }
       });
 
@@ -626,7 +723,7 @@ export class CommsManager {
   }
 
   /**
-   * Push-to-Talk (PTT) Key Up: Release microphone and transmit roger beep.
+   * Push-to-Talk (PTT) Key Up: Release microphone, transmit roger beep & voice burst.
    */
   public releasePtt() {
     if (!this.isPttPressed) return;
@@ -641,16 +738,51 @@ export class CommsManager {
       ? [this.session.targetMember]
       : this.membersList.filter(m => m.id !== this.currentMember?.id);
 
-    targets.forEach(member => {
-      const remotePeerId = member.peerId || this.getPeerIdForMember(member.id);
-      if (this.peer && !this.peer.destroyed) {
-        try {
-          const conn = this.peer.connect(remotePeerId);
-          conn.on('open', () => {
-            conn.send({ type: 'PTT_STOP' });
-          });
-        } catch {}
+    // Stop recording and package the voice burst
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      try {
+        const mime = this.mediaRecorder.mimeType || 'audio/webm';
+        this.mediaRecorder.onstop = () => {
+          if (this.pttRecordedChunks.length > 0) {
+            const audioBlob = new Blob(this.pttRecordedChunks, { type: mime });
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const base64Audio = reader.result as string;
+              if (base64Audio) {
+                // 1. Direct transmit over DataChannel
+                targets.forEach(member => {
+                  this.sendDataToMember(member, {
+                    type: 'RADIO_VOICE_BURST',
+                    audioData: base64Audio,
+                    senderName: this.currentMember?.name || 'Radio Unit'
+                  });
+                });
+
+                // 2. Transmit over Firestore signal bridge as guaranteed backup!
+                if (this.signalBridge && this.currentMember) {
+                  this.signalBridge({
+                    radioBurst: {
+                      senderId: this.currentMember.id,
+                      senderName: this.currentMember.name || 'Radio Unit',
+                      audioData: base64Audio,
+                      timestamp: Date.now(),
+                      targetMemberId: this.session?.targetMember?.id || 'all'
+                    }
+                  });
+                }
+              }
+            };
+            reader.readAsDataURL(audioBlob);
+          }
+        };
+        this.mediaRecorder.stop();
+      } catch (e) {
+        console.warn('MediaRecorder stop note:', e);
       }
+    }
+
+    targets.forEach(member => {
+      this.sendDataToMember(member, { type: 'PTT_STOP' });
 
       const activeCall = this.broadcastMediaConnections.get(member.id);
       if (activeCall) {
