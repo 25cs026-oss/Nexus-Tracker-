@@ -61,11 +61,20 @@ export const CommsModal: React.FC<CommsModalProps> = ({
   const pttButtonRef = useRef<HTMLButtonElement>(null);
   const isPttPointerDown = useRef<boolean>(false);
   const pttPressStartTime = useRef<number>(0);
+  const lastPttActionTime = useRef<number>(0);
 
-  const handlePttDown = (e: React.SyntheticEvent | Event) => {
+  const handlePttDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     try {
       if (e.cancelable) e.preventDefault();
       e.stopPropagation();
+    } catch {}
+
+    const now = Date.now();
+    if (now - lastPttActionTime.current < 200) return;
+    lastPttActionTime.current = now;
+
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
     } catch {}
 
     radioAudio.resumeContext();
@@ -80,24 +89,26 @@ export const CommsModal: React.FC<CommsModalProps> = ({
     }
 
     isPttPointerDown.current = true;
-    pttPressStartTime.current = Date.now();
+    pttPressStartTime.current = now;
     commsManager.pressPtt();
   };
 
-  const handlePttUp = (e: React.SyntheticEvent | Event) => {
+  const handlePttUp = (e: React.PointerEvent<HTMLButtonElement>) => {
     try {
       if (e.cancelable) e.preventDefault();
       e.stopPropagation();
     } catch {}
 
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {}
+
     if (!isPttPointerDown.current) return;
+    isPttPointerDown.current = false;
     const duration = Date.now() - pttPressStartTime.current;
 
-    if (duration >= 350) {
-      isPttPointerDown.current = false;
+    if (duration >= 300) {
       commsManager.releasePtt();
-    } else {
-      isPttPointerDown.current = false;
     }
   };
 
@@ -646,11 +657,6 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                     onPointerDown={handlePttDown}
                     onPointerUp={handlePttUp}
                     onPointerCancel={handlePttUp}
-                    onTouchStart={handlePttDown}
-                    onTouchEnd={handlePttUp}
-                    onTouchCancel={handlePttUp}
-                    onMouseDown={handlePttDown}
-                    onMouseUp={handlePttUp}
                     onContextMenu={(e) => e.preventDefault()}
                     className={`relative w-40 h-40 sm:w-48 sm:h-48 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-2xl touch-none ${
                       isPttPressed

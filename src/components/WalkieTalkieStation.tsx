@@ -48,6 +48,7 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
 
   const isPointerDownRef = useRef<boolean>(false);
   const pressStartTimeRef = useRef<number>(0);
+  const lastActionTimeRef = useRef<number>(0);
 
   // Sync state with commsManager
   useEffect(() => {
@@ -124,10 +125,18 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
     setIsPttPressed(false);
   };
 
-  const handlePointerDownAction = (e: React.SyntheticEvent | Event) => {
+  const handlePointerDownAction = (e: React.PointerEvent<HTMLButtonElement>) => {
     try {
       if (e.cancelable) e.preventDefault();
       e.stopPropagation();
+    } catch {}
+
+    const now = Date.now();
+    if (now - lastActionTimeRef.current < 200) return;
+    lastActionTimeRef.current = now;
+
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
     } catch {}
 
     radioAudio.resumeContext();
@@ -142,24 +151,26 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
     }
 
     isPointerDownRef.current = true;
-    pressStartTimeRef.current = Date.now();
+    pressStartTimeRef.current = now;
     handlePttStart();
   };
 
-  const handlePointerUpAction = (e: React.SyntheticEvent | Event) => {
+  const handlePointerUpAction = (e: React.PointerEvent<HTMLButtonElement>) => {
     try {
       if (e.cancelable) e.preventDefault();
       e.stopPropagation();
     } catch {}
 
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {}
+
     if (!isPointerDownRef.current) return;
+    isPointerDownRef.current = false;
     const duration = Date.now() - pressStartTimeRef.current;
 
-    if (duration >= 350) {
-      isPointerDownRef.current = false;
+    if (duration >= 300) {
       handlePttEnd();
-    } else {
-      isPointerDownRef.current = false;
     }
   };
 
@@ -282,11 +293,6 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
           onPointerDown={handlePointerDownAction}
           onPointerUp={handlePointerUpAction}
           onPointerCancel={handlePointerUpAction}
-          onTouchStart={handlePointerDownAction}
-          onTouchEnd={handlePointerUpAction}
-          onTouchCancel={handlePointerUpAction}
-          onMouseDown={handlePointerDownAction}
-          onMouseUp={handlePointerUpAction}
           onContextMenu={(e) => e.preventDefault()}
           className={`relative w-40 h-40 sm:w-44 sm:h-44 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-2xl touch-none ${
             isPttPressed

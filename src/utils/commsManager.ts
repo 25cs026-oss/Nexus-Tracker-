@@ -91,7 +91,8 @@ export class CommsManager {
   private pttAutoTimeout: any = null;
 
   // Audio elements for playback
-  private remoteAudioElement: HTMLAudioElement | null = null;
+  private liveAudioElement: HTMLAudioElement | null = null;
+  private voiceBurstAudioElement: HTMLAudioElement | null = null;
 
   // Signal Bridge to Firestore
   private signalBridge: SignalBridgeHandler | null = null;
@@ -101,40 +102,59 @@ export class CommsManager {
 
   constructor() {
     if (typeof window !== 'undefined') {
-      this.ensureAudioElementReady();
+      this.getOrCreateLiveAudioElement();
+      this.getOrCreateVoiceBurstAudioElement();
     }
   }
 
-  private ensureAudioElementReady(): HTMLAudioElement {
-    if (!this.remoteAudioElement && typeof document !== 'undefined') {
+  private createAudioElement(): HTMLAudioElement {
+    if (typeof document !== 'undefined') {
       try {
-        this.remoteAudioElement = document.createElement('audio');
-        this.remoteAudioElement.autoplay = true;
-        this.remoteAudioElement.setAttribute('playsinline', 'true');
-        this.remoteAudioElement.style.display = 'none';
+        const el = document.createElement('audio');
+        el.autoplay = true;
+        el.setAttribute('playsinline', 'true');
+        el.style.display = 'none';
         if (document.body) {
-          document.body.appendChild(this.remoteAudioElement);
+          document.body.appendChild(el);
         } else {
           document.addEventListener('DOMContentLoaded', () => {
-            if (this.remoteAudioElement && document.body && !document.body.contains(this.remoteAudioElement)) {
-              document.body.appendChild(this.remoteAudioElement);
+            if (document.body && !document.body.contains(el)) {
+              document.body.appendChild(el);
             }
           });
         }
+        return el;
       } catch {
-        this.remoteAudioElement = new Audio();
-        this.remoteAudioElement.autoplay = true;
+        const el = new Audio();
+        el.autoplay = true;
+        return el;
       }
     }
-    return this.remoteAudioElement as HTMLAudioElement;
+    return new Audio();
+  }
+
+  public getOrCreateLiveAudioElement(): HTMLAudioElement {
+    if (!this.liveAudioElement) {
+      this.liveAudioElement = this.createAudioElement();
+    }
+    if (typeof document !== 'undefined' && document.body && !document.body.contains(this.liveAudioElement)) {
+      try { document.body.appendChild(this.liveAudioElement); } catch {}
+    }
+    return this.liveAudioElement;
+  }
+
+  public getOrCreateVoiceBurstAudioElement(): HTMLAudioElement {
+    if (!this.voiceBurstAudioElement) {
+      this.voiceBurstAudioElement = this.createAudioElement();
+    }
+    if (typeof document !== 'undefined' && document.body && !document.body.contains(this.voiceBurstAudioElement)) {
+      try { document.body.appendChild(this.voiceBurstAudioElement); } catch {}
+    }
+    return this.voiceBurstAudioElement;
   }
 
   public getOrCreateAudioElement(): HTMLAudioElement {
-    const el = this.ensureAudioElementReady();
-    if (typeof document !== 'undefined' && document.body && el && !document.body.contains(el)) {
-      try { document.body.appendChild(el); } catch {}
-    }
-    return el;
+    return this.getOrCreateLiveAudioElement();
   }
 
   public setSignalBridge(bridge: SignalBridgeHandler | null) {
@@ -405,7 +425,7 @@ export class CommsManager {
 
       call.on('stream', (remoteMediaStream) => {
         this.remoteStream = remoteMediaStream;
-        const audio = this.getOrCreateAudioElement();
+        const audio = this.getOrCreateLiveAudioElement();
         audio.srcObject = remoteMediaStream;
         audio.play().catch(() => {});
         this.notify();
@@ -454,7 +474,7 @@ export class CommsManager {
     radioAudio.playPttStartChirp();
     this.notify();
 
-    const audio = this.getOrCreateAudioElement();
+    const audio = this.getOrCreateVoiceBurstAudioElement();
     audio.srcObject = null;
     audio.src = audioData;
     audio.play()
@@ -854,7 +874,8 @@ export class CommsManager {
 
         this.mediaRecorder.onstop = () => {
           if (this.localStream) {
-            this.localStream.getAudioTracks().forEach(t => { t.enabled = false; });
+            this.localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+            this.localStream = null;
           }
 
           if (this.pttRecordedChunks.length > 0) {
@@ -894,12 +915,14 @@ export class CommsManager {
       } catch (e) {
         console.warn('MediaRecorder stop note:', e);
         if (this.localStream) {
-          this.localStream.getAudioTracks().forEach(t => { t.enabled = false; });
+          this.localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+          this.localStream = null;
         }
       }
     } else {
       if (this.localStream) {
-        this.localStream.getAudioTracks().forEach(t => { t.enabled = false; });
+        this.localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+        this.localStream = null;
       }
     }
 
