@@ -215,7 +215,8 @@ export class CommsManager {
     if (this.circleId && idPart.startsWith(this.circleId)) {
       idPart = idPart.replace(this.circleId, '');
     }
-    const cleanMember = idPart.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase().slice(0, 24);
+    let cleanMember = idPart.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase().slice(0, 24);
+    if (!cleanMember) cleanMember = 'unit';
     return `nxt_${cleanCircle}_${cleanMember}`;
   }
 
@@ -228,14 +229,17 @@ export class CommsManager {
     this.membersList = members;
 
     const basePeerId = this.getPeerIdForMember(member.id);
-    if (this.peer && this.myPeerId && !this.peer.destroyed) {
-      return; // Already active
+    if (this.peer && this.myPeerId === basePeerId && !this.peer.destroyed) {
+      return; // Already active with same circle and credentials
     }
 
     if (this.peer) {
       this.cleanup();
     }
 
+    this.circleId = circleId;
+    this.currentMember = member;
+    this.membersList = members;
     this.createPeer(basePeerId);
   }
 
@@ -295,14 +299,14 @@ export class CommsManager {
   }
 
   public async ensurePeerOpen(): Promise<boolean> {
-    if (this.peer && this.peer.open) return true;
-    if (!this.peer && this.currentMember && this.circleId) {
+    if (this.peer && this.peer.open && !this.peer.destroyed) return true;
+    if ((!this.peer || this.peer.destroyed) && this.currentMember && this.circleId) {
       this.createPeer(this.getPeerIdForMember(this.currentMember.id));
     }
     if (!this.peer) return false;
 
     return new Promise<boolean>((resolve) => {
-      if (this.peer?.open) return resolve(true);
+      if (this.peer?.open && !this.peer.destroyed) return resolve(true);
       const timer = setTimeout(() => resolve(false), 4000);
       this.peer?.once('open', () => {
         clearTimeout(timer);
@@ -1255,6 +1259,13 @@ export class CommsManager {
     if (this.localStream) {
       this.localStream.getTracks().forEach(t => t.stop());
       this.localStream = null;
+    }
+
+    if (this.liveAudioElement) {
+      try {
+        this.liveAudioElement.srcObject = null;
+        this.liveAudioElement.pause();
+      } catch {}
     }
 
     this.remoteStream = null;

@@ -128,7 +128,7 @@ export const SafeZonesModal: React.FC<SafeZonesModalProps> = ({
                             {zone.name}
                           </h4>
                           <span className="text-xs text-slate-500">
-                            {zone.radius}m radius • {zone.lat.toFixed(4)}, {zone.lng.toFixed(4)}
+                            {zone.radius}m radius • {Number(zone.lat || 0).toFixed(4)}, {Number(zone.lng || 0).toFixed(4)}
                           </span>
                         </div>
                       </div>

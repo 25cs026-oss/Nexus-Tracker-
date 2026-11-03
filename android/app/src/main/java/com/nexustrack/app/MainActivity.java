@@ -375,7 +375,7 @@ public class MainActivity extends AppCompatActivity {
 
                     if (line != null) {
                         String fetchedUrl = line.trim();
-                        String currentUrl = prefs.getString(PREF_KEY_CLOUD_URL, "").trim();
+                        String currentUrl = prefs.getString(PREF_KEY_CLOUD_URL, DEFAULT_CLOUD_URL).trim();
 
                         if (fetchedUrl.startsWith("http") && !fetchedUrl.equals(currentUrl)) {
                             Log.d(TAG, "Discovered updated cloud URL from GitHub: " + fetchedUrl);

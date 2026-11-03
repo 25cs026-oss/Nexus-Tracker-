@@ -110,7 +110,7 @@ export const SosModal: React.FC<SosModalProps> = ({
           <div className="my-4 p-3 bg-red-50 dark:bg-red-950/40 rounded-2xl border border-red-200 dark:border-red-900 text-left text-xs space-y-1">
             <div className="flex justify-between text-slate-700 dark:text-slate-200">
               <span className="font-semibold">Coordinates:</span>
-              <span className="font-mono">{activeSosMember.lastLat.toFixed(5)}, {activeSosMember.lastLng.toFixed(5)}</span>
+              <span className="font-mono">{Number(activeSosMember.lastLat || 0).toFixed(5)}, {Number(activeSosMember.lastLng || 0).toFixed(5)}</span>
             </div>
             {activeSosMember.currentPlace && (
               <div className="flex justify-between text-slate-700 dark:text-slate-200">

@@ -99,7 +99,7 @@ export const TripTimeline: React.FC<TripTimelineProps> = ({
               <div className="flex-1 pb-1">
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-semibold text-slate-800 dark:text-slate-200">
-                    {point.placeName || `${point.lat.toFixed(4)}, ${point.lng.toFixed(4)}`}
+                    {point.placeName || `${Number(point.lat || 0).toFixed(4)}, ${Number(point.lng || 0).toFixed(4)}`}
                   </span>
                   <span className="text-[10px] text-slate-400">
                     {formatFullTime(point.timestamp)}

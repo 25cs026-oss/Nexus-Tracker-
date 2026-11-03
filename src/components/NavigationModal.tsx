@@ -101,7 +101,7 @@ export const NavigationModal: React.FC<NavigationModalProps> = ({
                 {targetMember.name}
               </div>
               <div className="text-[11px] text-slate-500">
-                {targetMember.currentPlace ? `At ${targetMember.currentPlace}` : `${targetMember.lastLat.toFixed(4)}, ${targetMember.lastLng.toFixed(4)}`}
+                {targetMember.currentPlace ? `At ${targetMember.currentPlace}` : `${Number(targetMember.lastLat || 0).toFixed(4)}, ${Number(targetMember.lastLng || 0).toFixed(4)}`}
               </div>
             </div>
           </div>

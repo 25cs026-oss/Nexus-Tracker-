@@ -554,7 +554,7 @@ export default function App() {
 
   // Fetch weather for selected member
   useEffect(() => {
-    if (!selectedMember) {
+    if (!selectedMember || typeof selectedMember.lastLat !== 'number' || typeof selectedMember.lastLng !== 'number') {
       setWeather(null);
       return;
     }
@@ -834,7 +834,18 @@ export default function App() {
         }
 
         // Live Comms & Video Call Signaling Detection
-        if (m.activeCall && m.activeCall.targetMemberId === memberDocId) {
+        const isTargetMe = Boolean(
+          m.activeCall && (
+            m.activeCall.targetMemberId === memberDocId ||
+            m.activeCall.targetMemberId === deviceId ||
+            (typeof m.activeCall.targetMemberId === 'string' && (
+              memberDocId.includes(m.activeCall.targetMemberId) ||
+              m.activeCall.targetMemberId.includes(memberDocId)
+            ))
+          )
+        );
+
+        if (m.activeCall && isTargetMe) {
           const callTime = m.activeCall.timestamp || 0;
           if (m.activeCall.status === 'ringing') {
             const ageMs = Date.now() - callTime;
@@ -861,7 +872,18 @@ export default function App() {
         }
 
         // If I am caller and remote party accepted or ended
-        if (m.activeCall && m.activeCall.callerId === memberDocId) {
+        const isCallerMe = Boolean(
+          m.activeCall && (
+            m.activeCall.callerId === memberDocId ||
+            m.activeCall.callerId === deviceId ||
+            (typeof m.activeCall.callerId === 'string' && (
+              memberDocId.includes(m.activeCall.callerId) ||
+              m.activeCall.callerId.includes(memberDocId)
+            ))
+          )
+        );
+
+        if (m.activeCall && isCallerMe) {
           if (m.activeCall.status === 'connected') {
             radioAudio.stopIncomingCallRingtone();
             const session = commsManager.getSession();
@@ -1377,7 +1399,7 @@ export default function App() {
       localStorage.setItem(MEMBER_ROLE_KEY, role);
       localStorage.setItem(MEMBER_AVATAR_KEY, avatar);
       localStorage.setItem(CIRCLE_PIN_KEY, pin);
-      localStorage.setItem(CIRCLE_DATA_KEY, JSON.stringify(newCircle));
+      localStorage.setItem(CIRCLE_DATA_KEY, JSON.stringify({ ...newCircle, createdAt: new Date().toISOString() }));
 
       setMemberName(creatorName);
       setMemberRole(role);
@@ -1446,9 +1468,10 @@ export default function App() {
     if (!currentCircle) return;
     const memberDocId = `${currentCircle.id}_${deviceId}`;
     const myName = memberName || 'Family Member';
-    const placeName = currentPlace?.name || '';
     const userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat || 19.0760;
     const userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng || 72.8777;
+    const currentPlace = findCurrentPlace(userLat, userLng, safeZones);
+    const placeName = currentPlace?.name || '';
 
     setMembers(prev =>
       prev.map(m => m.id === memberDocId || m.id === 'demo-you' ? { ...m, isSosActive: true } : m)
@@ -1626,6 +1649,7 @@ export default function App() {
 
     const userLat = currentCoords?.lat || geoService.lastKnownPosition?.lat || currentMember?.lastLat || 19.0760;
     const userLng = currentCoords?.lng || geoService.lastKnownPosition?.lng || currentMember?.lastLng || 72.8777;
+    const currentPlace = findCurrentPlace(userLat, userLng, safeZones);
 
     const newCheckIn: CheckInPing = {
       id: checkInId,
@@ -1776,7 +1800,7 @@ export default function App() {
   const circleSosMember: DeviceMember | null = circleActiveSos ? {
     id: circleActiveSos.memberId,
     name: circleActiveSos.memberName || 'Family Member',
-    role: 'Family',
+    role: 'Other' as MemberRole,
     avatar: '🚨',
     lastLat: Number(circleActiveSos.lat) || 19.0760,
     lastLng: Number(circleActiveSos.lng) || 72.8777,
@@ -3001,8 +3025,8 @@ export default function App() {
         <div className="flex items-center gap-2">
           <Radio className="w-3.5 h-3.5 animate-pulse" />
           <span>
-            {gpsStatus === 'active' && `📍 Live GPS Active • Coordinates: ${currentCoords?.lat.toFixed(5)}, ${currentCoords?.lng.toFixed(5)} (±${gpsAccuracy}m)`}
-            {gpsStatus === 'approximate' && `🌐 City Location Active: ${currentCoords?.lat.toFixed(4)}, ${currentCoords?.lng.toFixed(4)}`}
+            {gpsStatus === 'active' && currentCoords && `📍 Live GPS Active • Coordinates: ${currentCoords.lat.toFixed(5)}, ${currentCoords.lng.toFixed(5)} (±${gpsAccuracy}m)`}
+            {gpsStatus === 'approximate' && currentCoords && `🌐 City Location Active: ${currentCoords.lat.toFixed(4)}, ${currentCoords.lng.toFixed(4)}`}
             {gpsStatus === 'searching' && (gpsMessage || 'Acquiring satellite lock...')}
             {(gpsStatus === 'denied' || gpsStatus === 'unavailable' || gpsStatus === 'insecure') && (gpsMessage || 'GPS location permission needed. Allow in browser address bar.')}
           </span>
@@ -3074,7 +3098,7 @@ export default function App() {
                         At {selectedMember.currentPlace}
                       </span>
                     ) : (
-                      <span>Moving • {selectedMember.lastLat.toFixed(4)}, {selectedMember.lastLng.toFixed(4)}</span>
+                      <span>Moving • {typeof selectedMember.lastLat === 'number' ? selectedMember.lastLat.toFixed(4) : '--'}, {typeof selectedMember.lastLng === 'number' ? selectedMember.lastLng.toFixed(4) : '--'}</span>
                     )}
                     <span>•</span>
                     <span>{formatRelativeTime(selectedMember.lastUpdated)}</span>
