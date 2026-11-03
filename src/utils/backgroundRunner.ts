@@ -53,12 +53,9 @@ function generateSubAudibleWavBlob(durationSeconds = 10, sampleRate = 22050): Bl
   writeString(36, 'data');
   view.setUint32(40, dataSize, true);
 
-  // 25 Hz sub-audible sine wave (imperceptible, but recognized by OS as active audio)
-  const amplitude = 60; // Inaudible (0.18% of 32767)
+  // Completely silent PCM samples (amplitude = 0) so phone/laptop speakers never pop, buzz, or click
   for (let i = 0; i < numSamples; i++) {
-    const t = i / sampleRate;
-    const sample = Math.sin(2 * Math.PI * 25 * t) * amplitude;
-    view.setInt16(44 + i * 2, Math.round(sample), true);
+    view.setInt16(44 + i * 2, 0, true);
   }
 
   return new Blob([buffer], { type: 'audio/wav' });
@@ -123,7 +120,7 @@ export class BackgroundLocationRunner {
 
       this.audio = new Audio(audioUrl);
       this.audio.loop = true;
-      this.audio.volume = 0.05; // Effectively inaudible, but registers with AudioFlinger
+      this.audio.volume = 0.0001; // Pure silence, registers with OS audio subsystem without sound
 
       // Keep playing if interrupted by system
       this.audio.addEventListener('pause', () => {
@@ -159,8 +156,8 @@ export class BackgroundLocationRunner {
         const osc = this.audioContext.createOscillator();
         const gain = this.audioContext.createGain();
         osc.type = 'sine';
-        osc.frequency.setValueAtTime(25, this.audioContext.currentTime); // 25Hz sub-bass
-        gain.gain.setValueAtTime(0.002, this.audioContext.currentTime);
+        osc.frequency.setValueAtTime(25, this.audioContext.currentTime);
+        gain.gain.setValueAtTime(0, this.audioContext.currentTime); // 0 gain to ensure zero speaker noise
         osc.connect(gain);
         gain.connect(this.audioContext.destination);
         osc.start();

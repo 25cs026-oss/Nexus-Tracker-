@@ -270,6 +270,9 @@ class OfflineMapManager {
   /**
    * Subscribes to download progress updates
    */
+  private lastNotifyTime = 0;
+  private lastNotifyPercent = -1;
+
   public subscribe(cb: (progress: OfflineProgress) => void): () => void {
     this.subscribers.add(cb);
     cb(this.currentProgress);
@@ -284,6 +287,29 @@ class OfflineMapManager {
       try {
         sub(this.currentProgress);
       } catch {}
+    }
+  }
+
+  /**
+   * Throttles UI notification dispatches to prevent 60fps lag and UI glitches
+   */
+  private notifyThrottled(update: Partial<OfflineProgress>, force = false) {
+    const now = Date.now();
+    const nextProgress = { ...this.currentProgress, ...update };
+    const percent = nextProgress.percent;
+
+    if (
+      force ||
+      percent === 100 ||
+      percent === 0 ||
+      now - this.lastNotifyTime >= 300 ||
+      Math.abs(percent - this.lastNotifyPercent) >= 5
+    ) {
+      this.lastNotifyTime = now;
+      this.lastNotifyPercent = percent;
+      this.notify(update);
+    } else {
+      this.currentProgress = nextProgress;
     }
   }
 
@@ -379,7 +405,7 @@ class OfflineMapManager {
           if (existing) {
             completed++;
             totalBytes += existing.size;
-            this.notify({
+            this.notifyThrottled({
               completed,
               percent: Math.round(((completed + failed) / total) * 100)
             });
@@ -405,7 +431,7 @@ class OfflineMapManager {
           failed++;
         }
 
-        this.notify({
+        this.notifyThrottled({
           completed,
           failed,
           percent: Math.round(((completed + failed) / total) * 100)

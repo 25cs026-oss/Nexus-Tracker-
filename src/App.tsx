@@ -197,8 +197,16 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('map');
   const [copiedCode, setCopiedCode] = useState(false);
 
-  // Mobile Native App State
-  const [mobileSheetExpanded, setMobileSheetExpanded] = useState<boolean>(false);
+  // Mobile Native App State (3-tier sheet: 'expanded' | 'peek' | 'hidden')
+  const [mobileSheetState, setMobileSheetState] = useState<'expanded' | 'peek' | 'hidden'>('peek');
+  const mobileSheetExpanded = mobileSheetState === 'expanded';
+  const setMobileSheetExpanded = (expanded: boolean | ((prev: boolean) => boolean)) => {
+    if (typeof expanded === 'function') {
+      setMobileSheetState(prev => expanded(prev === 'expanded') ? 'expanded' : 'peek');
+    } else {
+      setMobileSheetState(expanded ? 'expanded' : 'peek');
+    }
+  };
   const [mobileTab, setMobileTab] = useState<'members' | 'radio' | 'history' | 'checkins'>('members');
   const [inlineFeedMsg, setInlineFeedMsg] = useState<string>('');
 
@@ -220,14 +228,25 @@ export default function App() {
 
   const handleSheetTouchEnd = () => {
     const deltaY = touchStartY.current - touchCurrentY.current;
-    if (deltaY > 30) {
+    if (deltaY > 35) {
       // Swiped UP -> expand bottom sheet
-      setMobileSheetExpanded(true);
-    } else if (deltaY < -30) {
-      // Swiped DOWN -> collapse bottom sheet to peek
-      setMobileSheetExpanded(false);
+      if (mobileSheetState === 'hidden') {
+        setMobileSheetState('peek');
+      } else {
+        setMobileSheetState('expanded');
+      }
+    } else if (deltaY < -35) {
+      // Swiped DOWN -> collapse to peek or fully hide off-screen
+      if (mobileSheetState === 'expanded') {
+        setMobileSheetState('peek');
+      } else {
+        setMobileSheetState('hidden'); // Fully down off-screen for clear map view!
+      }
     }
   };
+
+  // Initial load audio guard: Never trigger alarms, chimes, or bursts for historical data on app open
+  const isInitialDevicesSnapshot = useRef<boolean>(true);
 
   // Live Data
   const [members, setMembers] = useState<DeviceMember[]>([]);
@@ -793,13 +812,17 @@ export default function App() {
         if (data.safeZones) setSafeZones(data.safeZones);
         setCircleActiveSos(data.activeSos || null);
 
-        // Immediate Circle-Level SOS Broadcast Detection
+        // Immediate Circle-Level SOS Broadcast Detection (Only for fresh SOS within last 2 minutes)
         if (data.activeSos && data.activeSos.memberId !== memberDocId) {
-          notificationManager.showSosAlertNotification(data.activeSos.memberName, data.activeSos.place);
-          if (!isSirenMuted) {
-            sirenAudio.start();
+          const sosTime = data.activeSos.timestamp?.toMillis?.() || new Date(data.activeSos.timestamp || 0).getTime() || 0;
+          const sosAgeMs = Date.now() - sosTime;
+          if (sosAgeMs < 120000) {
+            notificationManager.showSosAlertNotification(data.activeSos.memberName, data.activeSos.place);
+            if (!isSirenMuted) {
+              sirenAudio.start();
+            }
+            setShowSosModal(true);
           }
-          setShowSosModal(true);
         } else if (!data.activeSos && (!activeSosMember || activeSosMember.id === memberDocId)) {
           sirenAudio.stop();
           notificationManager.clearSosNotification();
@@ -813,6 +836,27 @@ export default function App() {
     const devicesQuery = query(collection(db, 'devices'), where('gridId', '==', currentCircle.id));
     const unsubDevices = onSnapshot(devicesQuery, (snap) => {
       const rawList = snap.docs.map(d => ({ id: d.id, ...d.data() } as DeviceMember));
+
+      // On initial snapshot load when opening app, seed existing IDs to NEVER trigger sounds for history!
+      if (isInitialDevicesSnapshot.current) {
+        isInitialDevicesSnapshot.current = false;
+        for (const m of rawList) {
+          if (m.radioBurst?.timestamp) {
+            seenRadioBurstTimestamps.current.add(m.radioBurst.timestamp);
+          }
+          if (m.activeCall?.timestamp) {
+            handledCallTimestamps.current.add(m.activeCall.timestamp);
+          }
+          if (Array.isArray(m.recentCheckIns)) {
+            for (const chk of m.recentCheckIns) {
+              if (chk?.id) seenAlertedCheckInIds.current.add(chk.id);
+            }
+          }
+          if (m.latestCheckIn?.id) {
+            seenAlertedCheckInIds.current.add(m.latestCheckIn.id);
+          }
+        }
+      }
       
       const memberDocId = `${currentCircle.id}_${deviceId}`;
 
@@ -1106,38 +1150,49 @@ export default function App() {
   }, []);
 
   // Auto-download 10km radius offline map for Home location upon entering room/circle
+  const hasTriggeredOfflineCheck = useRef<string>('');
+
   useEffect(() => {
     if (!currentCircle) return;
 
-    // Identify Home location from safe zones or live coordinates
-    const homeZone = safeZones.find(z => 
-      z.id === 'zone-home' || 
-      z.name.toLowerCase().includes('home') || 
-      z.icon === '🏠'
-    );
+    // Debounce to allow Firestore safeZones to settle before checking offline map
+    const timer = setTimeout(() => {
+      // Identify Home location from safe zones or live coordinates
+      const homeZone = safeZones.find(z => 
+        z.id === 'zone-home' || 
+        z.name.toLowerCase().includes('home') || 
+        z.icon === '🏠'
+      );
 
-    let targetLat: number | undefined;
-    let targetLng: number | undefined;
-    let targetName = 'Home';
+      let targetLat: number | undefined;
+      let targetLng: number | undefined;
+      let targetName = 'Home';
 
-    if (homeZone && typeof homeZone.lat === 'number' && typeof homeZone.lng === 'number' && homeZone.lat !== 0) {
-      targetLat = homeZone.lat;
-      targetLng = homeZone.lng;
-      targetName = homeZone.name || 'Home';
-    } else if (safeZones.length > 0 && typeof safeZones[0].lat === 'number' && typeof safeZones[0].lng === 'number' && safeZones[0].lat !== 0) {
-      targetLat = safeZones[0].lat;
-      targetLng = safeZones[0].lng;
-      targetName = safeZones[0].name || 'Home';
-    } else if (currentCoords?.lat && currentCoords?.lng) {
-      targetLat = currentCoords.lat;
-      targetLng = currentCoords.lng;
-      targetName = 'Home';
-    }
+      if (homeZone && typeof homeZone.lat === 'number' && typeof homeZone.lng === 'number' && homeZone.lat !== 0) {
+        targetLat = homeZone.lat;
+        targetLng = homeZone.lng;
+        targetName = homeZone.name || 'Home';
+      } else if (safeZones.length > 0 && typeof safeZones[0].lat === 'number' && typeof safeZones[0].lng === 'number' && safeZones[0].lat !== 0) {
+        targetLat = safeZones[0].lat;
+        targetLng = safeZones[0].lng;
+        targetName = safeZones[0].name || 'Home';
+      } else if (currentCoords?.lat && currentCoords?.lng) {
+        targetLat = currentCoords.lat;
+        targetLng = currentCoords.lng;
+        targetName = 'Home';
+      }
 
-    if (targetLat !== undefined && targetLng !== undefined) {
-      offlineMapManager.checkAndAutoDownloadHome(targetLat, targetLng, targetName);
-    }
-  }, [currentCircle?.id, safeZones, currentCoords?.lat, currentCoords?.lng]);
+      if (targetLat !== undefined && targetLng !== undefined) {
+        const key = `${currentCircle.id}_${targetLat.toFixed(3)}_${targetLng.toFixed(3)}`;
+        if (hasTriggeredOfflineCheck.current !== key) {
+          hasTriggeredOfflineCheck.current = key;
+          offlineMapManager.checkAndAutoDownloadHome(targetLat, targetLng, targetName);
+        }
+      }
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, [currentCircle?.id, safeZones.length]);
 
   // Center on Me Handler
   const handleCenterOnMe = () => {
@@ -2177,7 +2232,13 @@ export default function App() {
 
       {/* 3. Mobile Floating Action Buttons (Center on me, Awake, Step GPS) */}
       <div className={`lg:hidden fixed right-3.5 z-20 flex-col gap-2.5 pointer-events-auto transition-all duration-300 ${
-        mobileSheetExpanded ? 'hidden' : selectedMember ? 'bottom-[270px] flex' : 'bottom-48 flex'
+        mobileSheetState === 'expanded'
+          ? 'hidden'
+          : mobileSheetState === 'hidden'
+            ? 'bottom-16 flex'
+            : selectedMember
+              ? 'bottom-[270px] flex'
+              : 'bottom-48 flex'
       }`}>
         {/* Center on Me */}
         <button
@@ -2214,38 +2275,99 @@ export default function App() {
       {/* 4. Mobile Sliding Bottom Sheet & App Dock */}
       <div className="lg:hidden fixed inset-x-0 bottom-0 z-30">
         {/* Backdrop overlay when sheet is expanded */}
-        {mobileSheetExpanded && (
+        {mobileSheetState === 'expanded' && (
           <div
             className="fixed inset-0 bg-black/50 backdrop-blur-xs z-20 transition-opacity"
-            onClick={() => setMobileSheetExpanded(false)}
+            onClick={() => setMobileSheetState('peek')}
           />
+        )}
+
+        {/* Floating Restore Handle when Bottom Sheet is Fully Hidden */}
+        {mobileSheetState === 'hidden' && (
+          <div
+            onTouchStart={handleSheetTouchStart}
+            onTouchMove={handleSheetTouchMove}
+            onTouchEnd={handleSheetTouchEnd}
+            onClick={() => setMobileSheetState('peek')}
+            className="fixed bottom-3 inset-x-0 mx-auto w-fit z-40 px-4 py-2 bg-slate-900/90 dark:bg-slate-800/90 text-white rounded-full shadow-2xl backdrop-blur-md flex items-center gap-2 text-xs font-bold border border-white/20 active:scale-95 transition-all cursor-pointer animate-fade-in select-none"
+            title="Tap or swipe up to show family & menu"
+          >
+            <ChevronUp className="w-4 h-4 text-emerald-400 animate-bounce" />
+            <span>Show Family Menu</span>
+            {members.length > 0 && (
+              <span className="w-4 h-4 bg-emerald-500 text-white rounded-full text-[9px] flex items-center justify-center font-bold">
+                {members.length}
+              </span>
+            )}
+          </div>
         )}
 
         {/* The Bottom Sheet Container */}
         <div
           className={`relative z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-slate-200/90 dark:border-slate-800 rounded-t-[28px] shadow-[0_-12px_40px_rgba(0,0,0,0.18)] transition-all duration-300 ease-out flex flex-col ${
-            mobileSheetExpanded ? 'h-[80dvh]' : 'h-auto'
+            mobileSheetState === 'expanded'
+              ? 'h-[80dvh] translate-y-0 opacity-100'
+              : mobileSheetState === 'peek'
+                ? 'h-auto translate-y-0 opacity-100'
+                : 'h-auto translate-y-full opacity-0 pointer-events-none'
           }`}
         >
           {/* Gesture-Enabled Drag Handle Bar (Touch / Swipe / Tap) */}
           <div
-            onClick={() => setMobileSheetExpanded(prev => !prev)}
             onTouchStart={handleSheetTouchStart}
             onTouchMove={handleSheetTouchMove}
             onTouchEnd={handleSheetTouchEnd}
-            className="pt-3 pb-2 px-6 cursor-pointer flex flex-col items-center justify-center select-none active:opacity-60 transition-opacity touch-none"
-            title="Swipe up for timeline & feed, swipe down to collapse"
+            className="pt-2.5 pb-2 px-4 flex items-center justify-between select-none active:opacity-90 transition-opacity touch-none border-b border-slate-100/60 dark:border-slate-800/60"
           >
-            <div className="w-12 h-1.5 bg-slate-300 dark:bg-slate-600 rounded-full mb-1 transition-all" />
-            <div className="flex items-center gap-1 text-[11px] font-semibold text-slate-400 dark:text-slate-500">
-              {mobileSheetExpanded ? (
-                <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400 font-bold">
-                  <ChevronDown className="w-3.5 h-3.5" /> Tap or swipe down for Map
-                </span>
-              ) : (
-                <span>{selectedMember ? 'Tap or swipe up for details' : 'Swipe up for timeline & feed'}</span>
-              )}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMobileSheetState('hidden');
+              }}
+              className="p-1 px-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg text-[10px] font-semibold flex items-center gap-1 active:scale-95 transition-all"
+              title="Hide panel for clear map view"
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+              <span>Hide</span>
+            </button>
+
+            <div 
+              onClick={() => setMobileSheetState(prev => prev === 'expanded' ? 'peek' : 'expanded')}
+              className="cursor-pointer flex flex-col items-center flex-1 mx-2"
+            >
+              <div className="w-12 h-1.5 bg-slate-300 dark:bg-slate-600 rounded-full mb-1 transition-all" />
+              <div className="flex items-center gap-1 text-[11px] font-semibold text-slate-400 dark:text-slate-500">
+                {mobileSheetState === 'expanded' ? (
+                  <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400 font-bold">
+                    <ChevronDown className="w-3.5 h-3.5" /> Swipe down for Map
+                  </span>
+                ) : (
+                  <span>Swipe down to hide • Swipe up to expand</span>
+                )}
+              </div>
             </div>
+
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMobileSheetState(prev => prev === 'expanded' ? 'peek' : 'expanded');
+              }}
+              className="p-1 px-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg text-[10px] font-semibold flex items-center gap-1 active:scale-95 transition-all"
+            >
+              {mobileSheetState === 'expanded' ? (
+                <>
+                  <span>Peek</span>
+                  <ChevronDown className="w-3.5 h-3.5" />
+                </>
+              ) : (
+                <>
+                  <span>More</span>
+                  <ChevronUp className="w-3.5 h-3.5" />
+                </>
+              )}
+            </button>
           </div>
 
           {/* PEEK MODE: Selected Member Card, Horizontal Avatars & Quick Actions */}
@@ -2725,12 +2847,19 @@ export default function App() {
           <div className="border-t border-slate-200/80 dark:border-slate-800/80 px-2 py-1.5 flex items-center justify-around bg-white/95 dark:bg-slate-900/95 backdrop-blur-md pb-safe">
             {/* Map Tab */}
             <button
-              onClick={() => setMobileSheetExpanded(false)}
+              onClick={() => {
+                if (mobileSheetState === 'peek') {
+                  setMobileSheetState('hidden');
+                } else {
+                  setMobileSheetState('peek');
+                }
+              }}
               className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl transition-all ${
-                !mobileSheetExpanded
+                mobileSheetState !== 'expanded'
                   ? 'text-blue-600 dark:text-blue-400 font-bold scale-105'
                   : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
               }`}
+              title="Toggle clear map view"
             >
               <MapIcon className="w-4 h-4" />
               <span className="text-[10px]">Map</span>

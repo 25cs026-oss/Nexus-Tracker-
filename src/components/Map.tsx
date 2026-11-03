@@ -607,18 +607,18 @@ export const Map: React.FC<MapProps> = ({
       </MapContainer>
 
       {/* Floating Offline Map Status (Top Left) */}
-      <div className="absolute top-16 lg:top-3 left-3 z-[400] flex items-center gap-2">
+      <div className="absolute top-14 lg:top-3 left-3 z-[400] flex items-center gap-2">
         {offlineProgress.isDownloading ? (
           <button
             onClick={() => setShowOfflineModal(true)}
-            className="flex items-center gap-2 px-3 py-1.5 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-full shadow-md border border-indigo-200 dark:border-indigo-800 text-xs font-semibold text-indigo-700 dark:text-indigo-300 animate-pulse hover:bg-white transition-all cursor-pointer"
+            className="flex items-center gap-2 px-3 py-1 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-full shadow-md border border-indigo-200 dark:border-indigo-800 text-xs font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-white transition-all cursor-pointer"
             title="Downloading 10km Offline Map"
           >
-            <Download className="w-3.5 h-3.5 animate-bounce text-indigo-600 dark:text-indigo-400" />
-            <span>Downloading 10km Map: {offlineProgress.percent}%</span>
-            <div className="w-12 h-1.5 bg-indigo-100 dark:bg-indigo-950 rounded-full overflow-hidden">
+            <Download className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+            <span className="text-[11px]">Caching 10km: {offlineProgress.percent}%</span>
+            <div className="w-10 h-1.5 bg-indigo-100 dark:bg-indigo-950 rounded-full overflow-hidden">
               <div 
-                className="h-full bg-indigo-600 transition-all duration-300"
+                className="h-full bg-indigo-600 transition-all duration-300 ease-out"
                 style={{ width: `${offlineProgress.percent}%` }}
               />
             </div>
@@ -626,21 +626,22 @@ export const Map: React.FC<MapProps> = ({
         ) : !isOnline ? (
           <button
             onClick={() => setShowOfflineModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/95 text-white backdrop-blur-md rounded-full shadow-md text-xs font-bold hover:bg-amber-600 transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 px-2.5 py-1 bg-amber-500 text-white backdrop-blur-md rounded-full shadow-md text-xs font-bold hover:bg-amber-600 transition-colors cursor-pointer"
             title="Offline Mode Active - Using 10km Cached Map"
           >
             <WifiOff className="w-3.5 h-3.5" />
-            <span>Offline Mode (10km Map Active)</span>
+            <span className="text-[11px]">Offline Mode (10km Active)</span>
           </button>
         ) : offlineProgress.isComplete ? (
           <button
             onClick={() => setShowOfflineModal(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1 bg-white/90 dark:bg-slate-900/90 text-slate-700 dark:text-slate-300 backdrop-blur-md rounded-full shadow-xs border border-slate-200/90 dark:border-slate-800 text-[11px] font-medium hover:bg-white dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 px-2.5 py-1 bg-white/90 dark:bg-slate-900/90 text-slate-700 dark:text-slate-300 backdrop-blur-md rounded-full shadow-xs border border-slate-200/90 dark:border-slate-800 text-[11px] font-medium hover:bg-white dark:hover:bg-slate-800 transition-all cursor-pointer"
             title="10km Home Map Cached Offline"
           >
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
             <HardDriveDownload className="w-3.5 h-3.5 text-emerald-500" />
-            <span className="hidden sm:inline">10km Home Offline Ready</span>
-            <span className="sm:hidden">Offline Ready</span>
+            <span className="hidden sm:inline">10km Offline Ready</span>
+            <span className="sm:hidden text-[10px]">10km Ready</span>
           </button>
         ) : homeLocation ? (
           <button
@@ -653,8 +654,8 @@ export const Map: React.FC<MapProps> = ({
             title="Download 10km Home Area for Offline Use"
           >
             <Download className="w-3.5 h-3.5 text-indigo-500" />
-            <span className="hidden sm:inline">Cache 10km Home Map</span>
-            <span className="sm:hidden">Cache Map</span>
+            <span className="hidden sm:inline">Cache 10km Map</span>
+            <span className="sm:hidden text-[10px]">Cache Map</span>
           </button>
         ) : null}
       </div>
