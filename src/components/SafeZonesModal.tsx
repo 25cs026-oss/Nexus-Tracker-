@@ -124,9 +124,16 @@ export const SafeZonesModal: React.FC<SafeZonesModalProps> = ({
                           {zone.icon}
                         </span>
                         <div>
-                          <h4 className="font-bold text-slate-800 dark:text-slate-100 text-sm">
-                            {zone.name}
-                          </h4>
+                          <div className="flex items-center gap-1.5">
+                            <h4 className="font-bold text-slate-800 dark:text-slate-100 text-sm">
+                              {zone.name}
+                            </h4>
+                            {(zone.id === 'zone-home' || zone.name.toLowerCase().includes('home') || zone.icon === '🏠') && (
+                              <span className="px-1.5 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/80 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold">
+                                10km Offline Map
+                              </span>
+                            )}
+                          </div>
                           <span className="text-xs text-slate-500">
                             {zone.radius}m radius • {Number(zone.lat || 0).toFixed(4)}, {Number(zone.lng || 0).toFixed(4)}
                           </span>

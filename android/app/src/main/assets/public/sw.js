@@ -48,6 +48,60 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Dedicated Offline Map Tiles Interceptor (Serves downloaded 10km offline map immediately)
+  const isTileRequest = 
+    url.hostname.includes('tile.openstreetmap.org') ||
+    url.hostname.includes('basemaps.cartocdn.com') ||
+    url.hostname.includes('arcgisonline.com');
+
+  if (isTileRequest) {
+    event.respondWith(
+      (async () => {
+        // 1. Check offline tile cache first (0ms latency, 100% offline support)
+        const offlineCache = await caches.open('nexus-offline-map-tiles');
+        let cached = await offlineCache.match(event.request);
+        if (!cached) {
+          cached = await caches.match(event.request);
+        }
+        if (cached) {
+          return cached;
+        }
+
+        // 2. Not in cache: fetch from network
+        try {
+          const networkResponse = await fetch(event.request);
+          if (networkResponse && networkResponse.status === 200) {
+            offlineCache.put(event.request, networkResponse.clone());
+          }
+          return networkResponse;
+        } catch (fetchErr) {
+          // 3. Network failed: Try matching fallback without subdomain
+          const fallbackUrl = `https://tile.openstreetmap.org${url.pathname}`;
+          const fallbackCached = await offlineCache.match(fallbackUrl);
+          if (fallbackCached) {
+            return fallbackCached;
+          }
+          // Fallback: 1x1 transparent PNG so offline map never displays broken image icons
+          return new Response(
+            new Uint8Array([
+              0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+              0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+              0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+              0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+              0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+              0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
+            ]),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'image/png' }
+            }
+          );
+        }
+      })()
+    );
+    return;
+  }
+
   event.respondWith(
     fetch(event.request)
       .then((networkResponse) => {

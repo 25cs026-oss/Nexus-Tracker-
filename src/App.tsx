@@ -66,6 +66,7 @@ import { notificationManager } from './utils/notificationManager';
 import { sirenAudio } from './utils/sirenAudio';
 import { radioAudio } from './utils/radioAudio';
 import { commsManager } from './utils/commsManager';
+import { offlineMapManager } from './utils/offlineMapManager';
 
 import { 
   Users, 
@@ -1104,6 +1105,40 @@ export default function App() {
     return () => unsub();
   }, []);
 
+  // Auto-download 10km radius offline map for Home location upon entering room/circle
+  useEffect(() => {
+    if (!currentCircle) return;
+
+    // Identify Home location from safe zones or live coordinates
+    const homeZone = safeZones.find(z => 
+      z.id === 'zone-home' || 
+      z.name.toLowerCase().includes('home') || 
+      z.icon === '🏠'
+    );
+
+    let targetLat: number | undefined;
+    let targetLng: number | undefined;
+    let targetName = 'Home';
+
+    if (homeZone && typeof homeZone.lat === 'number' && typeof homeZone.lng === 'number' && homeZone.lat !== 0) {
+      targetLat = homeZone.lat;
+      targetLng = homeZone.lng;
+      targetName = homeZone.name || 'Home';
+    } else if (safeZones.length > 0 && typeof safeZones[0].lat === 'number' && typeof safeZones[0].lng === 'number' && safeZones[0].lat !== 0) {
+      targetLat = safeZones[0].lat;
+      targetLng = safeZones[0].lng;
+      targetName = safeZones[0].name || 'Home';
+    } else if (currentCoords?.lat && currentCoords?.lng) {
+      targetLat = currentCoords.lat;
+      targetLng = currentCoords.lng;
+      targetName = 'Home';
+    }
+
+    if (targetLat !== undefined && targetLng !== undefined) {
+      offlineMapManager.checkAndAutoDownloadHome(targetLat, targetLng, targetName);
+    }
+  }, [currentCircle?.id, safeZones, currentCoords?.lat, currentCoords?.lng]);
+
   // Center on Me Handler
   const handleCenterOnMe = () => {
     if (currentCoords) {
@@ -1357,6 +1392,7 @@ export default function App() {
       }, { merge: true });
 
       setMapFocusOverride({ lat: userLat, lng: userLng });
+      offlineMapManager.checkAndAutoDownloadHome(userLat, userLng, 'Home');
       return true;
     } catch (err) {
       console.error('Failed to join circle:', err);
@@ -1425,6 +1461,7 @@ export default function App() {
       }, { merge: true });
 
       setMapFocusOverride({ lat: userLat, lng: userLng });
+      offlineMapManager.checkAndAutoDownloadHome(userLat, userLng, 'Home');
       return true;
     } catch {
       const fallbackCircle: GridCircle = {

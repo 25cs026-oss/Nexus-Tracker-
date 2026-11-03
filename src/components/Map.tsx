@@ -12,6 +12,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { DeviceMember, SafeZone, HistoryPoint } from '../types';
 import { formatRelativeTime, formatSpeed } from '../utils/geo';
+import { offlineMapManager, OfflineProgress } from '../utils/offlineMapManager';
 import { 
   Crosshair, 
   Users,
@@ -22,7 +23,14 @@ import {
   AlertTriangle,
   MapPin,
   Radio,
-  Video
+  Video,
+  Download,
+  WifiOff,
+  HardDriveDownload,
+  CheckCircle2,
+  Trash2,
+  RefreshCw,
+  X
 } from 'lucide-react';
 
 interface MapProps {
@@ -223,6 +231,86 @@ function MapViewController({
   return null;
 }
 
+// High-performance Offline-capable TileLayer for 10km cached map
+function OfflineTileLayer({
+  url,
+  attribution,
+  maxZoom = 19,
+  maxNativeZoom = 16,
+  activeLayer
+}: {
+  url: string;
+  attribution: string;
+  maxZoom?: number;
+  maxNativeZoom?: number;
+  activeLayer: string;
+}) {
+  const map = useMap();
+  const layerRef = useRef<L.TileLayer | null>(null);
+
+  useEffect(() => {
+    const CustomLayer = L.TileLayer.extend({
+      createTile(coords: any, done: (err: any, tile: HTMLImageElement) => void) {
+        const tile = document.createElement('img');
+        L.DomEvent.on(tile, 'load', L.Util.bind((this as any)._tileOnLoad, this, done, tile));
+        L.DomEvent.on(tile, 'error', L.Util.bind((this as any)._tileOnError, this, done, tile));
+
+        if (this.options.crossOrigin || this.options.crossOrigin === '') {
+          tile.crossOrigin = this.options.crossOrigin === true ? '' : this.options.crossOrigin;
+        }
+        tile.alt = '';
+        tile.setAttribute('role', 'presentation');
+
+        const defaultUrl = this.getTileUrl(coords);
+
+        if (activeLayer === 'streets') {
+          offlineMapManager.getTileBlobUrl(coords.z, coords.x, coords.y).then((blobUrl) => {
+            if (blobUrl) {
+              tile.src = blobUrl;
+            } else {
+              tile.src = defaultUrl;
+            }
+          }).catch(() => {
+            tile.src = defaultUrl;
+          });
+        } else {
+          tile.src = defaultUrl;
+        }
+
+        return tile;
+      }
+    });
+
+    const layer = new (CustomLayer as any)(url, {
+      attribution,
+      maxZoom,
+      maxNativeZoom,
+      subdomains: ['a', 'b', 'c']
+    });
+
+    layer.addTo(map);
+    layerRef.current = layer;
+
+    const unsub = offlineMapManager.subscribe((prog) => {
+      if (prog.isComplete && layerRef.current) {
+        try {
+          layerRef.current.redraw();
+        } catch {}
+      }
+    });
+
+    return () => {
+      unsub();
+      if (layerRef.current) {
+        map.removeLayer(layerRef.current);
+        layerRef.current = null;
+      }
+    };
+  }, [map, url, attribution, maxZoom, maxNativeZoom, activeLayer]);
+
+  return null;
+}
+
 export const Map: React.FC<MapProps> = ({
   members,
   selectedMember,
@@ -242,6 +330,44 @@ export const Map: React.FC<MapProps> = ({
   const [showLayerMenu, setShowLayerMenu] = useState(false);
   const [triggerFit, setTriggerFit] = useState(0);
 
+  // Offline Map State
+  const [offlineProgress, setOfflineProgress] = useState<OfflineProgress>(() => offlineMapManager.getProgress());
+  const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [showOfflineModal, setShowOfflineModal] = useState<boolean>(false);
+
+  // Home location determination for offline map
+  const homeLocation = useMemo(() => {
+    const hz = safeZones.find(z => 
+      z.id === 'zone-home' || 
+      z.name.toLowerCase().includes('home') || 
+      z.icon === '🏠'
+    );
+    if (hz && typeof hz.lat === 'number' && typeof hz.lng === 'number' && hz.lat !== 0) {
+      return { lat: hz.lat, lng: hz.lng, name: hz.name };
+    }
+    if (safeZones.length > 0 && typeof safeZones[0].lat === 'number' && typeof safeZones[0].lng === 'number' && safeZones[0].lat !== 0) {
+      return { lat: safeZones[0].lat, lng: safeZones[0].lng, name: safeZones[0].name };
+    }
+    if (currentCoords?.lat && currentCoords?.lng) {
+      return { lat: currentCoords.lat, lng: currentCoords.lng, name: 'Home' };
+    }
+    return null;
+  }, [safeZones, currentCoords]);
+
+  // Network & Offline Manager listener
+  useEffect(() => {
+    const unsub = offlineMapManager.subscribe(setOfflineProgress);
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      unsub();
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
   // Compute default center once upon mounting
   const defaultCenter = useMemo<[number, number]>(() => {
     if (focusLocation) return [focusLocation.lat, focusLocation.lng];
@@ -259,11 +385,13 @@ export const Map: React.FC<MapProps> = ({
         className="w-full h-full min-h-[380px]"
         zoomControl={false}
       >
-        {/* Active Tile Layer */}
-        <TileLayer
+        {/* Offline-Enabled Active Tile Layer */}
+        <OfflineTileLayer
           attribution={TILE_LAYERS[activeLayer].attribution}
           url={TILE_LAYERS[activeLayer].url}
           maxZoom={19}
+          maxNativeZoom={16}
+          activeLayer={activeLayer}
         />
 
         <MapViewController
@@ -478,6 +606,59 @@ export const Map: React.FC<MapProps> = ({
         })}
       </MapContainer>
 
+      {/* Floating Offline Map Status (Top Left) */}
+      <div className="absolute top-16 lg:top-3 left-3 z-[400] flex items-center gap-2">
+        {offlineProgress.isDownloading ? (
+          <button
+            onClick={() => setShowOfflineModal(true)}
+            className="flex items-center gap-2 px-3 py-1.5 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-full shadow-md border border-indigo-200 dark:border-indigo-800 text-xs font-semibold text-indigo-700 dark:text-indigo-300 animate-pulse hover:bg-white transition-all cursor-pointer"
+            title="Downloading 10km Offline Map"
+          >
+            <Download className="w-3.5 h-3.5 animate-bounce text-indigo-600 dark:text-indigo-400" />
+            <span>Downloading 10km Map: {offlineProgress.percent}%</span>
+            <div className="w-12 h-1.5 bg-indigo-100 dark:bg-indigo-950 rounded-full overflow-hidden">
+              <div 
+                className="h-full bg-indigo-600 transition-all duration-300"
+                style={{ width: `${offlineProgress.percent}%` }}
+              />
+            </div>
+          </button>
+        ) : !isOnline ? (
+          <button
+            onClick={() => setShowOfflineModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/95 text-white backdrop-blur-md rounded-full shadow-md text-xs font-bold hover:bg-amber-600 transition-colors cursor-pointer"
+            title="Offline Mode Active - Using 10km Cached Map"
+          >
+            <WifiOff className="w-3.5 h-3.5" />
+            <span>Offline Mode (10km Map Active)</span>
+          </button>
+        ) : offlineProgress.isComplete ? (
+          <button
+            onClick={() => setShowOfflineModal(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 bg-white/90 dark:bg-slate-900/90 text-slate-700 dark:text-slate-300 backdrop-blur-md rounded-full shadow-xs border border-slate-200/90 dark:border-slate-800 text-[11px] font-medium hover:bg-white dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            title="10km Home Map Cached Offline"
+          >
+            <HardDriveDownload className="w-3.5 h-3.5 text-emerald-500" />
+            <span className="hidden sm:inline">10km Home Offline Ready</span>
+            <span className="sm:hidden">Offline Ready</span>
+          </button>
+        ) : homeLocation ? (
+          <button
+            onClick={() => {
+              if (homeLocation) {
+                offlineMapManager.downloadArea(homeLocation.lat, homeLocation.lng, 10, homeLocation.name);
+              }
+            }}
+            className="flex items-center gap-1.5 px-2.5 py-1 bg-white/90 dark:bg-slate-900/90 text-slate-700 dark:text-slate-300 backdrop-blur-md rounded-full shadow-xs border border-slate-200/90 dark:border-slate-800 text-[11px] font-medium hover:bg-white dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            title="Download 10km Home Area for Offline Use"
+          >
+            <Download className="w-3.5 h-3.5 text-indigo-500" />
+            <span className="hidden sm:inline">Cache 10km Home Map</span>
+            <span className="sm:hidden">Cache Map</span>
+          </button>
+        ) : null}
+      </div>
+
       {/* Floating Controls Bar (Top Right) */}
       <div className="absolute top-16 lg:top-3 right-3 z-[400] flex flex-col gap-2">
         {/* Layer Switcher */}
@@ -497,7 +678,7 @@ export const Map: React.FC<MapProps> = ({
                 className="fixed inset-0 z-40" 
                 onClick={() => setShowLayerMenu(false)}
               />
-              <div className="absolute right-0 top-full mt-1.5 flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-xl p-1.5 gap-1 min-w-[130px] z-50 animate-fade-in">
+              <div className="absolute right-0 top-full mt-1.5 flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-xl p-1.5 gap-1 min-w-[150px] z-50 animate-fade-in">
                 <button
                   onClick={() => {
                     setActiveLayer('streets');
@@ -510,7 +691,7 @@ export const Map: React.FC<MapProps> = ({
                   }`}
                 >
                   <span>🗺️</span>
-                  <span>Streets</span>
+                  <span>Streets (Offline)</span>
                 </button>
                 <button
                   onClick={() => {
@@ -540,6 +721,19 @@ export const Map: React.FC<MapProps> = ({
                   <span>🌙</span>
                   <span>Voyager</span>
                 </button>
+
+                <div className="border-t border-slate-100 dark:border-slate-700/80 my-1 pt-1">
+                  <button
+                    onClick={() => {
+                      setShowLayerMenu(false);
+                      setShowOfflineModal(true);
+                    }}
+                    className="w-full px-3 py-1.5 rounded-xl text-xs font-semibold text-left text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700/60 transition-colors flex items-center gap-2"
+                  >
+                    <HardDriveDownload className="w-3.5 h-3.5 text-emerald-500" />
+                    <span>Offline Maps</span>
+                  </button>
+                </div>
               </div>
             </>
           )}
@@ -548,7 +742,7 @@ export const Map: React.FC<MapProps> = ({
         {/* Fit All Members */}
         <button
           onClick={() => setTriggerFit(prev => prev + 1)}
-          className="w-9 h-9 bg-white/95 dark:bg-slate-800/95 backdrop-blur-xs text-slate-700 dark:text-slate-200 rounded-xl shadow-md border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all"
+          className="w-9 h-9 bg-white/95 dark:bg-slate-800/95 backdrop-blur-xs text-slate-700 dark:text-slate-200 rounded-xl shadow-md border border-slate-200/80 dark:border-slate-700 flex items-center justify-center hover:bg-white transition-all active:scale-95"
           title="Fit All Family Members in View"
         >
           <Users className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
@@ -562,6 +756,103 @@ export const Map: React.FC<MapProps> = ({
         </span>
         <span>{members.length} {members.length === 1 ? 'member' : 'members'} online</span>
       </div>
+
+      {/* Offline Map Details & Control Modal */}
+      {showOfflineModal && (
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-fade-in">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl p-6 text-slate-800 dark:text-slate-100 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-indigo-50 dark:bg-indigo-950/80 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+                  <HardDriveDownload className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base">Offline Map Cache</h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">10 km radius around Home</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowOfflineModal(false)}
+                className="w-8 h-8 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-700/60 space-y-2 text-xs">
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500 dark:text-slate-400">Home Location:</span>
+                  <span className="font-semibold">{homeLocation?.name || 'Default Home'}</span>
+                </div>
+                {homeLocation && (
+                  <div className="flex justify-between items-center text-[11px] text-slate-400">
+                    <span>Coordinates:</span>
+                    <span>{homeLocation.lat.toFixed(4)}, {homeLocation.lng.toFixed(4)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500 dark:text-slate-400">Coverage Radius:</span>
+                  <span className="font-semibold text-indigo-600 dark:text-indigo-400">10 km (~314 km²)</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500 dark:text-slate-400">Offline Status:</span>
+                  {offlineProgress.isDownloading ? (
+                    <span className="font-bold text-indigo-600 dark:text-indigo-400 animate-pulse">
+                      Downloading {offlineProgress.percent}% ({offlineProgress.completed}/{offlineProgress.total} tiles)
+                    </span>
+                  ) : offlineProgress.isComplete ? (
+                    <span className="font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Ready Offline ({offlineProgress.completed || offlineProgress.total} tiles)
+                    </span>
+                  ) : (
+                    <span className="font-medium text-amber-500">Not Downloaded</span>
+                  )}
+                </div>
+
+                {offlineProgress.isDownloading && (
+                  <div className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden mt-2">
+                    <div 
+                      className="h-full bg-indigo-600 transition-all duration-300"
+                      style={{ width: `${offlineProgress.percent}%` }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                When you enter a room or circle, Nexus Tracker automatically caches a 10 km radius around your Home location so that you can view roads, landmarks, and family members even without internet or cellular reception.
+              </p>
+            </div>
+
+            <div className="pt-2 flex flex-col gap-2">
+              <button
+                onClick={() => {
+                  if (homeLocation) {
+                    offlineMapManager.downloadArea(homeLocation.lat, homeLocation.lng, 10, homeLocation.name);
+                  }
+                }}
+                disabled={offlineProgress.isDownloading || !homeLocation}
+                className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-sm transition-all active:scale-[0.98]"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${offlineProgress.isDownloading ? 'animate-spin' : ''}`} />
+                <span>{offlineProgress.isDownloading ? 'Downloading...' : 'Re-download 10km Area Now'}</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  offlineMapManager.clearCache();
+                }}
+                disabled={offlineProgress.isDownloading}
+                className="w-full py-2 px-4 bg-slate-100 hover:bg-red-50 dark:bg-slate-800 dark:hover:bg-red-950/40 text-slate-600 hover:text-red-600 dark:text-slate-300 dark:hover:text-red-400 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear Offline Map Cache</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
