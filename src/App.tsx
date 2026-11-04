@@ -247,6 +247,13 @@ export default function App() {
 
   // Initial load audio guard: Never trigger alarms, chimes, or bursts for historical data on app open
   const isInitialDevicesSnapshot = useRef<boolean>(true);
+  const appMountTimestamp = useRef<number>(Date.now());
+
+  // Guarantee zero audio playback on startup
+  useEffect(() => {
+    sirenAudio.stop();
+    radioAudio.stopIncomingCallRingtone();
+  }, []);
 
   // Live Data
   const [members, setMembers] = useState<DeviceMember[]>([]);
@@ -288,7 +295,7 @@ export default function App() {
   const [showSafeZonesModal, setShowSafeZonesModal] = useState(false);
   const [showSosModal, setShowSosModal] = useState(false);
   const [dismissedSosMemberId, setDismissedSosMemberId] = useState<string | null>(null);
-  const [isSirenMuted, setIsSirenMuted] = useState<boolean>(false);
+  const [isSirenMuted, setIsSirenMuted] = useState<boolean>(true);
   const lastAlertedSosId = useRef<string | null>(null);
   const [circleActiveSos, setCircleActiveSos] = useState<any>(null);
   const [showCheckInModal, setShowCheckInModal] = useState(false);
@@ -367,27 +374,6 @@ export default function App() {
     } catch (err) {
       console.warn('Heartbeat firestore sync failed:', err);
     }
-
-    // Background Active SOS Poller (guarantees screen-off / background notification delivery)
-    try {
-      const sosQ = query(
-        collection(db, 'devices'),
-        where('gridId', '==', currentCircle.id),
-        where('isSosActive', '==', true)
-      );
-      const sosSnap = await getDocs(sosQ);
-      if (!sosSnap.empty) {
-        for (const docSnap of sosSnap.docs) {
-          const sosMember = docSnap.data() as DeviceMember;
-          if (sosMember.id !== memberDocId) {
-            // Another member triggered SOS!
-            notificationManager.showSosAlertNotification(sosMember.name, sosMember.currentPlace);
-            sirenAudio.start();
-            setShowSosModal(true);
-          }
-        }
-      }
-    } catch {}
   }, [currentCircle, isDemoMode, isSharingPaused, currentCoords, deviceId, safeZones, memberName, memberRole, memberAvatar, currentSpeed, gpsAccuracy]);
 
   // Auto-switch to Eco-Mode when user locks screen, minimizes, or switches apps + wake up on resume
@@ -812,15 +798,18 @@ export default function App() {
         if (data.safeZones) setSafeZones(data.safeZones);
         setCircleActiveSos(data.activeSos || null);
 
-        // Immediate Circle-Level SOS Broadcast Detection (Only for fresh SOS within last 2 minutes)
+        // Immediate Circle-Level SOS Broadcast Detection (Only for fresh SOS within last 2 minutes and after app mount)
         if (data.activeSos && data.activeSos.memberId !== memberDocId) {
           const sosTime = data.activeSos.timestamp?.toMillis?.() || new Date(data.activeSos.timestamp || 0).getTime() || 0;
           const sosAgeMs = Date.now() - sosTime;
-          if (sosAgeMs < 120000) {
+          const isFresh = sosTime > appMountTimestamp.current && sosAgeMs < 120000;
+          if (isFresh) {
             notificationManager.showSosAlertNotification(data.activeSos.memberName, data.activeSos.place);
-            if (!isSirenMuted) {
-              sirenAudio.start();
-            }
+            setIsSirenMuted(false);
+            sirenAudio.start();
+            setShowSosModal(true);
+          } else if (sosAgeMs < 120000) {
+            // Pre-existing SOS on app open: show modal visually, keep siren silent
             setShowSosModal(true);
           }
         } else if (!data.activeSos && (!activeSosMember || activeSosMember.id === memberDocId)) {
@@ -894,7 +883,7 @@ export default function App() {
           const callTime = m.activeCall.timestamp || 0;
           if (m.activeCall.status === 'ringing') {
             const ageMs = Date.now() - callTime;
-            if (ageMs < 45000 && !handledCallTimestamps.current.has(callTime)) {
+            if (ageMs < 45000 && callTime > appMountTimestamp.current && !handledCallTimestamps.current.has(callTime)) {
               const currentSession = commsManager.getSession();
               if (!currentSession || currentSession.status !== 'connected') {
                 handledCallTimestamps.current.add(callTime);
@@ -945,7 +934,7 @@ export default function App() {
         if (m.radioBurst && m.radioBurst.senderId !== memberDocId) {
           const burstTime = m.radioBurst.timestamp || 0;
           const ageMs = Date.now() - burstTime;
-          if (ageMs < 25000 && !seenRadioBurstTimestamps.current.has(burstTime)) {
+          if (ageMs < 25000 && burstTime > appMountTimestamp.current && !seenRadioBurstTimestamps.current.has(burstTime)) {
             seenRadioBurstTimestamps.current.add(burstTime);
             const target = m.radioBurst.targetMemberId;
             const isForMe = !target || 
@@ -982,8 +971,9 @@ export default function App() {
         const newest = result[0];
         if (newest && newest.deviceId !== memberDocId && !seenAlertedCheckInIds.current.has(newest.id)) {
           seenAlertedCheckInIds.current.add(newest.id);
-          const ageSec = (Date.now() - new Date(newest.timestamp || 0).getTime()) / 1000;
-          if (ageSec < 300) {
+          const checkInTime = new Date(newest.timestamp || 0).getTime();
+          const ageSec = (Date.now() - checkInTime) / 1000;
+          if (ageSec < 300 && checkInTime > appMountTimestamp.current) {
             notificationManager.showImportantNotification(
               `💬 ${newest.memberName}: Check-in`,
               newest.message || 'Shared a status update'
@@ -1008,15 +998,21 @@ export default function App() {
       // 3. Real-time detection of external SOS alert
       const otherSos = approvedOnly.find(m => m.isSosActive && m.id !== memberDocId);
       if (otherSos) {
+        const otherSosTime = (otherSos as any).sosTimestamp?.toMillis?.() ||
+                             new Date((otherSos as any).sosTimestamp || (otherSos as any).timestamp || 0).getTime() || 0;
+        const isFresh = otherSosTime > appMountTimestamp.current;
+
         if (dismissedSosMemberId !== otherSos.id) {
           setShowSosModal(true);
-          if (!isSirenMuted) {
+          if (isFresh && !isSirenMuted) {
             sirenAudio.start();
           }
         }
         if (lastAlertedSosId.current !== otherSos.id) {
           lastAlertedSosId.current = otherSos.id;
-          notificationManager.showSosAlertNotification(otherSos.name, otherSos.currentPlace);
+          if (isFresh) {
+            notificationManager.showSosAlertNotification(otherSos.name, otherSos.currentPlace);
+          }
         }
       }
 
@@ -1690,6 +1686,18 @@ export default function App() {
     sirenAudio.stop();
   };
 
+  const handleToggleMuteSiren = () => {
+    setIsSirenMuted(prev => {
+      const next = !prev;
+      if (next) {
+        sirenAudio.stop();
+      } else {
+        sirenAudio.start();
+      }
+      return next;
+    });
+  };
+
   // Approve a pending member (Grant permission to enter room)
   const handleApproveMember = async (memberId: string) => {
     try {
@@ -1909,10 +1917,14 @@ export default function App() {
   useEffect(() => {
     if (activeSosMember) {
       const isDismissed = dismissedSosMemberId === activeSosMember.id;
+      const sosTime = (activeSosMember as any).sosTimestamp?.toMillis?.() ||
+                      new Date((activeSosMember as any).sosTimestamp || (activeSosMember as any).timestamp || 0).getTime() || 0;
+      const isFresh = sosTime > appMountTimestamp.current;
+
       if (!isDismissed) {
         setShowSosModal(true);
-        // Play emergency siren if not muted
-        if (!isSirenMuted) {
+        // Play emergency siren ONLY if freshly triggered in this session and not muted
+        if (!isSirenMuted && isFresh) {
           sirenAudio.start();
         } else {
           sirenAudio.stop();
@@ -1922,8 +1934,8 @@ export default function App() {
         sirenAudio.stop();
       }
 
-      // Pop high-priority notification in notification bar
-      if (lastAlertedSosId.current !== activeSosMember.id) {
+      // Pop high-priority notification in notification bar ONLY for live SOS
+      if (isFresh && lastAlertedSosId.current !== activeSosMember.id) {
         lastAlertedSosId.current = activeSosMember.id;
         notificationManager.showSosAlertNotification(
           activeSosMember.name,
@@ -1935,7 +1947,7 @@ export default function App() {
       sirenAudio.stop();
       lastAlertedSosId.current = null;
       setDismissedSosMemberId(null);
-      setIsSirenMuted(false);
+      setIsSirenMuted(true);
       notificationManager.clearSosNotification();
     }
   }, [activeSosMember?.id, activeSosMember?.name, activeSosMember?.currentPlace, isSirenMuted, dismissedSosMemberId]);
@@ -2208,7 +2220,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-1.5 shrink-0 ml-1">
             <button
-              onClick={() => setIsSirenMuted(prev => !prev)}
+              onClick={handleToggleMuteSiren}
               className="p-1 px-1.5 rounded-lg bg-red-800 text-white text-[10px]"
               title={isSirenMuted ? 'Unmute Siren Alarm' : 'Silence Siren'}
             >
@@ -3215,7 +3227,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2.5">
             <button
-              onClick={() => setIsSirenMuted(prev => !prev)}
+              onClick={handleToggleMuteSiren}
               className="p-1 px-2.5 rounded-lg bg-red-800 text-white text-xs font-bold"
             >
               {isSirenMuted ? '🔇 Unmute Siren' : '🔊 Mute Siren'}
@@ -3714,7 +3726,7 @@ export default function App() {
         activeSosMember={activeSosMember}
         isCurrentUserSos={isCurrentUserSos}
         isSirenMuted={isSirenMuted}
-        onToggleMuteSiren={() => setIsSirenMuted(prev => !prev)}
+        onToggleMuteSiren={handleToggleMuteSiren}
       />
 
       {/* Check In Modal */}

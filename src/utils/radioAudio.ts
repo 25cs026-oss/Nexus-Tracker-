@@ -283,16 +283,3 @@ class RadioAudioEngine {
 
 export const radioAudio = new RadioAudioEngine();
 
-if (typeof window !== 'undefined') {
-  const unlockAudioContext = () => {
-    radioAudio.resumeContext();
-    window.removeEventListener('click', unlockAudioContext);
-    window.removeEventListener('touchstart', unlockAudioContext);
-    window.removeEventListener('keydown', unlockAudioContext);
-    window.removeEventListener('pointerdown', unlockAudioContext);
-  };
-  window.addEventListener('click', unlockAudioContext, { passive: true, once: true });
-  window.addEventListener('touchstart', unlockAudioContext, { passive: true, once: true });
-  window.addEventListener('keydown', unlockAudioContext, { passive: true, once: true });
-  window.addEventListener('pointerdown', unlockAudioContext, { passive: true, once: true });
-}
