@@ -1,47 +1,10 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    
-    <!-- Background Gradient: Deep Royal Cobalt Blue to Midnight Indigo -->
     <path
-        android:pathData="M0,0h108v108h-108z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:startX="15"
-                android:startY="10"
-                android:endX="95"
-                android:endY="98"
-                android:type="linear">
-                <item android:color="#2563EB" android:offset="0.0" />
-                <item android:color="#1D4ED8" android:offset="0.45" />
-                <item android:color="#0F172A" android:offset="1.0" />
-            </gradient>
-        </aapt:attr>
-    </path>
-
-    <!-- Radar Pulse Waves (Center at 54, 46) -->
-    <!-- Inner radar wave -->
-    <path
-        android:strokeWidth="1.2"
-        android:strokeColor="#2560A5FA"
-        android:fillColor="#00000000"
-        android:pathData="M 54,26 C 65.04,26 74,34.96 74,46 C 74,57.04 65.04,66 54,66 C 42.96,66 34,57.04 34,46 C 34,34.96 42.96,26 54,26 Z" />
-
-    <!-- Outer radar wave -->
-    <path
-        android:strokeWidth="1"
-        android:strokeColor="#1893C5FD"
-        android:fillColor="#00000000"
-        android:pathData="M 54,14 C 71.67,14 86,28.33 86,46 C 86,63.67 71.67,78 54,78 C 36.33,78 22,63.67 22,46 C 22,28.33 36.33,14 54,14 Z" />
-
-    <!-- Subtle GPS crosshair lines -->
-    <path
-        android:strokeWidth="0.8"
-        android:strokeColor="#12FFFFFF"
-        android:fillColor="#00000000"
-        android:pathData="M 54,16 L 54,76 M 24,46 L 84,46" />
+        android:pathData="M0,0h108v108h-108z"
+        android:fillColor="#09121B" />
 </vector>
