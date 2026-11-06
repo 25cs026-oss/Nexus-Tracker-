@@ -73,3 +73,17 @@
 .animate-fade-in {
   animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
+
+/* Mobile Safe Area Insets for Notch / Punch-hole screens */
+.pt-safe {
+  padding-top: max(12px, env(safe-area-inset-top, 12px));
+}
+.pb-safe {
+  padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
+}
+.pr-safe {
+  padding-right: max(12px, env(safe-area-inset-right, 12px));
+}
+.pl-safe {
+  padding-left: max(12px, env(safe-area-inset-left, 12px));
+}

@@ -2077,37 +2077,24 @@ export default function App() {
       {/* 📱 MOBILE NATIVE EXPERIENCE (Find My / Life360 style) */}
       
       {/* 1. Mobile Floating Frosted Glass Header */}
-      <div className="lg:hidden fixed top-0 inset-x-0 z-30 pointer-events-none p-3 pt-safe flex items-center justify-between gap-2">
+      <div className="lg:hidden fixed top-0 inset-x-0 z-30 pointer-events-none px-3 pt-safe pb-2 flex items-center justify-between gap-2 max-w-full">
         {/* Left: Circle Name Pill & Switcher */}
-        <div className="pointer-events-auto relative">
-          <div className="flex items-center gap-1.5 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md px-3 py-1.5 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-lg">
-            <button
-              onClick={() => setShowCircleSwitcher(!showCircleSwitcher)}
-              className="flex items-center gap-1.5 text-xs font-black text-slate-800 dark:text-slate-100 max-w-[130px] truncate"
-            >
-              <Users className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-              <span className="truncate">{currentCircle.name}</span>
-                  {isCircleOwner && (
-                    <span className="text-amber-500 text-xs font-bold shrink-0" title="You created this circle (Owner)">👑</span>
-                  )}
-              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform ${showCircleSwitcher ? 'rotate-180' : ''}`} />
-            </button>
-
-            <span className="text-slate-300 dark:text-slate-700">|</span>
-
-            <button
-              onClick={handleCopyCode}
-              className="flex items-center gap-1 text-[11px] font-mono font-bold text-slate-600 dark:text-slate-300 active:scale-95"
-              title="Copy PIN"
-            >
-              <span>{currentCircle.id}</span>
-              {copiedCode ? (
-                <Check className="w-3 h-3 text-emerald-500" />
-              ) : (
-                <Copy className="w-3 h-3 text-slate-400" />
-              )}
-            </button>
-          </div>
+        <div className="pointer-events-auto relative shrink-0">
+          <button
+            onClick={() => setShowCircleSwitcher(!showCircleSwitcher)}
+            className="flex items-center gap-2 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md px-3 py-1.5 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-md text-xs font-black text-slate-800 dark:text-slate-100 active:scale-95 transition-all"
+            title="Circle Options & Switcher"
+          >
+            <div className="relative flex items-center justify-center">
+              <Users className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+              <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-slate-900" title="Live Tracking Active" />
+            </div>
+            <span className="truncate max-w-[95px] sm:max-w-[130px] font-extrabold">{currentCircle.name}</span>
+            {isCircleOwner && (
+              <span className="text-amber-500 text-xs shrink-0" title="You created this circle (Owner)">👑</span>
+            )}
+            <ChevronDown className={`w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform duration-200 ${showCircleSwitcher ? 'rotate-180' : ''}`} />
+          </button>
 
           {/* Circle Switcher Dropdown (Mobile) */}
           {showCircleSwitcher && (
@@ -2116,8 +2103,23 @@ export default function App() {
                 className="fixed inset-0 z-40"
                 onClick={() => setShowCircleSwitcher(false)}
               />
-              <div className="absolute top-full left-0 mt-2 z-50 w-64 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-2 text-xs">
-                <div className="px-3 py-1.5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between font-bold text-slate-400 text-[10px] uppercase">
+              <div className="absolute top-full left-0 mt-2 z-50 w-72 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl p-3 text-xs animate-fade-in">
+                {/* Dedicated Invite PIN card */}
+                <div className="p-3 bg-gradient-to-br from-blue-500/10 via-indigo-500/10 to-emerald-500/10 border border-blue-500/20 rounded-2xl mb-2 flex items-center justify-between gap-2 shadow-xs">
+                  <div>
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400">Invite Code / PIN</div>
+                    <div className="text-base font-mono font-black text-slate-900 dark:text-white tracking-widest">{currentCircle.id}</div>
+                  </div>
+                  <button
+                    onClick={handleCopyCode}
+                    className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm active:scale-95 transition-all"
+                  >
+                    {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-300" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedCode ? 'Copied!' : 'Copy'}</span>
+                  </button>
+                </div>
+
+                <div className="px-1 py-1 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between font-bold text-slate-400 text-[10px] uppercase">
                   <span>Your Circles</span>
                   <span>{savedCircles.length}</span>
                 </div>
@@ -2131,7 +2133,7 @@ export default function App() {
                           setShowCircleSwitcher(false);
                           if (!isActive) handleSelectSavedCircle(c.id);
                         }}
-                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left ${
+                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-colors ${
                           isActive
                             ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-bold'
                             : 'hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
@@ -2151,7 +2153,7 @@ export default function App() {
                     setShowCircleSwitcher(false);
                     setCurrentCircle(null);
                   }}
-                  className="w-full mt-1 py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5"
+                  className="w-full mt-2 py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 active:scale-95 transition-all"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>Join / Create Circle</span>
@@ -2161,56 +2163,39 @@ export default function App() {
           )}
         </div>
 
-        {/* Right: GPS Pill, SOS Button, Settings */}
-        <div className="pointer-events-auto flex items-center gap-1.5">
-          {/* Live GPS Status Pill */}
-          <button
-            onClick={handleCenterOnMe}
-            className={`px-2.5 py-1.5 rounded-2xl text-[11px] font-bold flex items-center gap-1.5 shadow-md backdrop-blur-md border ${
-              gpsStatus === 'active'
-                ? 'bg-emerald-500/90 text-white border-emerald-400/80 shadow-emerald-500/20'
-                : gpsStatus === 'approximate'
-                  ? 'bg-blue-500/90 text-white border-blue-400/80'
-                  : gpsStatus === 'searching'
-                    ? 'bg-amber-500/90 text-white border-amber-400/80 animate-pulse'
-                    : 'bg-slate-800/90 text-slate-200 border-slate-700'
-            }`}
-            title="GPS Status — Tap to center on you"
-          >
-            <Radio className={`w-3 h-3 ${isTracking ? 'animate-pulse' : ''}`} />
-            <span>{gpsStatus === 'active' ? 'Live' : gpsStatus === 'approximate' ? 'City' : 'GPS'}</span>
-          </button>
-
+        {/* Right: Comms, SOS Button, Settings Icon (Guaranteed visible, never clipped!) */}
+        <div className="pointer-events-auto flex items-center gap-1.5 shrink-0">
           {/* Tactical Walkie-Talkie & Video Comms */}
           <button
             onClick={() => {
               setMobileTab('radio');
               setMobileSheetExpanded(true);
             }}
-            className="px-2.5 py-1.5 rounded-2xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-[11px] font-bold flex items-center gap-1.5 shadow-md shadow-blue-500/20 transition-all cursor-pointer"
-            title="Tactical Walkie-Talkie & Video Call"
+            className="px-2.5 py-1.5 rounded-2xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-[11px] font-bold flex items-center gap-1 shadow-md shadow-blue-500/20 transition-all shrink-0 cursor-pointer"
+            title="Tactical Walkie-Talkie & Video Comms"
           >
-            <Radio className="w-3.5 h-3.5 animate-pulse" />
-            <span>Walkie-Talkie</span>
+            <Radio className="w-3.5 h-3.5 animate-pulse shrink-0" />
+            <span>Radio</span>
           </button>
 
           {/* SOS Emergency Button */}
           <button
             onClick={() => setShowSosModal(true)}
-            className="px-3 py-1.5 rounded-2xl bg-red-600 hover:bg-red-700 active:scale-95 text-white text-[11px] font-black flex items-center gap-1 shadow-lg shadow-red-500/30 transition-all"
-            title="Emergency SOS"
+            className="px-2.5 py-1.5 rounded-2xl bg-red-600 hover:bg-red-700 active:scale-95 text-white text-[11px] font-black flex items-center gap-1 shadow-md shadow-red-500/30 transition-all shrink-0 cursor-pointer"
+            title="Emergency SOS Alert"
           >
-            <ShieldAlert className="w-3.5 h-3.5" />
+            <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
             <span>SOS</span>
           </button>
 
-          {/* Settings Icon */}
+          {/* Settings Icon - Guaranteed 100% visible, fully padded, never cut off! */}
           <button
             onClick={() => setShowSettingsModal(true)}
-            className="w-8 h-8 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200/80 dark:border-slate-800 shadow-lg flex items-center justify-center text-slate-700 dark:text-slate-300 active:scale-95 transition-transform"
-            title="Settings"
+            className="w-9 h-9 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200/80 dark:border-slate-800 shadow-md flex items-center justify-center text-slate-700 dark:text-slate-200 active:scale-95 transition-all shrink-0 cursor-pointer hover:bg-white dark:hover:bg-slate-800"
+            title="Circle Settings & Profile"
+            aria-label="Settings"
           >
-            <Settings className="w-4 h-4" />
+            <Settings className="w-4 h-4 text-slate-700 dark:text-slate-300" />
           </button>
         </div>
       </div>
@@ -2278,14 +2263,16 @@ export default function App() {
           <Radio className={`w-5 h-5 ${isBackgroundActive ? 'animate-pulse text-white' : 'text-slate-500'}`} />
         </button>
 
-        {/* Step GPS Simulator */}
-        <button
-          onClick={handleSimulateWalk}
-          className="w-11 h-11 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-md shadow-xl border border-slate-200/80 dark:border-slate-800 flex items-center justify-center text-emerald-600 dark:text-emerald-400 active:scale-90 transition-transform"
-          title="Step GPS Simulator"
-        >
-          <LocateFixed className="w-5 h-5" />
-        </button>
+        {/* Step GPS Simulator (Demo Mode Only) */}
+        {isDemoMode && (
+          <button
+            onClick={handleSimulateWalk}
+            className="w-11 h-11 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-md shadow-xl border border-slate-200/80 dark:border-slate-800 flex items-center justify-center text-emerald-600 dark:text-emerald-400 active:scale-90 transition-transform"
+            title="Step GPS Simulator"
+          >
+            <LocateFixed className="w-5 h-5" />
+          </button>
+        )}
       </div>
 
       {/* 4. Mobile Sliding Bottom Sheet & App Dock */}
@@ -2428,11 +2415,39 @@ export default function App() {
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       onClick={() => setNavigatingMember(selectedMember)}
-                      className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-sm transition-all"
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-sm transition-all"
+                      title="Navigate / Get Directions"
                     >
                       <Navigation className="w-3.5 h-3.5" />
                       <span>Directions</span>
                     </button>
+                    {selectedMember.id !== currentMember?.id && (
+                      <>
+                        <button
+                          onClick={() => {
+                            commsManager.openRadio(selectedMember);
+                            setShowCommsModal(true);
+                          }}
+                          className="p-1.5 px-2 bg-blue-100 hover:bg-blue-200 dark:bg-blue-950/80 dark:hover:bg-blue-900 text-blue-700 dark:text-blue-300 rounded-xl text-xs font-bold flex items-center gap-1 active:scale-95 transition-all"
+                          title="Walkie-Talkie Radio"
+                        >
+                          <Radio className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                          <span className="hidden sm:inline">Radio</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            radioAudio.resumeContext();
+                            commsManager.startVideoCall(selectedMember);
+                            setShowCommsModal(true);
+                          }}
+                          className="p-1.5 px-2 bg-emerald-100 hover:bg-emerald-200 dark:bg-emerald-950/80 dark:hover:bg-emerald-900 text-emerald-700 dark:text-emerald-300 rounded-xl text-xs font-bold flex items-center gap-1 active:scale-95 transition-all"
+                          title="Start Video Call"
+                        >
+                          <Video className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                          <span className="hidden sm:inline">Video</span>
+                        </button>
+                      </>
+                    )}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -2444,6 +2459,27 @@ export default function App() {
                       <X className="w-4 h-4" />
                     </button>
                   </div>
+                </div>
+              )}
+
+              {/* New User Onboarding Prompt when Circle has only 1 member */}
+              {members.length <= 1 && (
+                <div className="p-2.5 rounded-2xl bg-gradient-to-r from-blue-500/10 via-indigo-500/10 to-emerald-500/10 border border-blue-500/20 flex items-center justify-between gap-2 shadow-xs">
+                  <div className="min-w-0">
+                    <div className="text-xs font-black text-slate-900 dark:text-white flex items-center gap-1">
+                      <span>👋 Invite Your Family</span>
+                    </div>
+                    <div className="text-[11px] text-slate-600 dark:text-slate-400 truncate mt-0.5">
+                      Share PIN <span className="font-mono font-bold text-blue-600 dark:text-blue-400">{currentCircle.id}</span> so family can join your map!
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleCopyCode}
+                    className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1 shrink-0 active:scale-95 shadow-sm transition-all"
+                  >
+                    {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-300" /> : <Share2 className="w-3.5 h-3.5" />}
+                    <span>{copiedCode ? 'Copied' : 'Invite'}</span>
+                  </button>
                 </div>
               )}
 

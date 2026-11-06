@@ -607,7 +607,7 @@ export const Map: React.FC<MapProps> = ({
       </MapContainer>
 
       {/* Floating Offline Map Status (Top Left) */}
-      <div className="absolute top-14 lg:top-3 left-3 z-[400] flex items-center gap-2">
+      <div className="absolute top-[calc(56px+env(safe-area-inset-top,0px))] lg:top-3 left-3 z-[400] flex items-center gap-2">
         {offlineProgress.isDownloading ? (
           <button
             onClick={() => setShowOfflineModal(true)}
@@ -661,7 +661,7 @@ export const Map: React.FC<MapProps> = ({
       </div>
 
       {/* Floating Controls Bar (Top Right) */}
-      <div className="absolute top-16 lg:top-3 right-3 z-[400] flex flex-col gap-2">
+      <div className="absolute top-[calc(56px+env(safe-area-inset-top,0px))] lg:top-3 right-3 z-[400] flex flex-col gap-2">
         {/* Layer Switcher */}
         <div className="relative">
           <button
