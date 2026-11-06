@@ -46,6 +46,7 @@ export interface DeviceMember {
     timestamp: number;
   } | null;
   radioBurst?: {
+    burstId?: string;
     senderId: string;
     senderName: string;
     audioData: string;

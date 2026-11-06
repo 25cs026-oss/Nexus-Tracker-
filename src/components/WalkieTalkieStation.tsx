@@ -1,13 +1,13 @@
 /**
  * Nexus Tactical Walkie-Talkie Station & Comms Deck
  * 
- * Embedded directly in Nexus Tracker main dashboard (Tabs & Dock).
+ * Embedded in Nexus Tracker main dashboard (Tabs & Dock).
  * Features:
- * - Large tactile PUSH TO TALK button (Mouse, Touch, or Spacebar).
- * - Authentic Motorola/Mil-Spec squelch chirps & roger beeps.
- * - Circle Broadcast (All members) & 1-on-1 direct private radio channels.
- * - HD Live Video Call 1-touch dialer for members.
- * - Microphone test mode & live audio visualizer waves.
+ * - Instant PTT with pre-warmed audio engine (Zero start lag).
+ * - Dual PTT Mode: "Hold to Speak" & "Click to Talk" (Hands-free toggle).
+ * - Real-time channel switching: Circle Broadcast & 1-on-1 private unit channels.
+ * - 1-Touch HD Video Call initiator for members.
+ * - Dynamic Tactical audio wave visualizer.
  */
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -20,10 +20,10 @@ import {
   Users, 
   Mic, 
   Volume2, 
-  Sparkles,
   Signal, 
-  ShieldCheck, 
-  Activity 
+  AlertTriangle,
+  RadioTower,
+  Headphones
 } from 'lucide-react';
 
 interface WalkieTalkieStationProps {
@@ -42,19 +42,26 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
   onStartVideoCall
 }) => {
   const [isPttPressed, setIsPttPressed] = useState<boolean>(commsManager.isPttActive());
-  const [selectedTargetId, setSelectedTargetId] = useState<string>('all'); // 'all' or member.id
+  const [selectedTargetId, setSelectedTargetId] = useState<string>('all');
   const [remoteSpeaker, setRemoteSpeaker] = useState<{ name: string; isSpeaking: boolean } | null>(commsManager.getRemoteSpeaker());
-  const [transmissionCount, setTransmissionCount] = useState<number>(0);
+  const [isToggleMode, setIsToggleMode] = useState<boolean>(false);
+  const [permissionWarning, setPermissionWarning] = useState<string | null>(commsManager.getPermissionWarning());
 
   const isPointerDownRef = useRef<boolean>(false);
   const pressStartTimeRef = useRef<number>(0);
   const lastActionTimeRef = useRef<number>(0);
+
+  // Pre-warm microphone immediately on station load
+  useEffect(() => {
+    commsManager.openRadio(selectedTargetId === 'all' ? undefined : members.find(m => m.id === selectedTargetId));
+  }, [selectedTargetId]);
 
   // Sync state with commsManager
   useEffect(() => {
     const unsub = commsManager.subscribe(() => {
       setIsPttPressed(commsManager.isPttActive());
       setRemoteSpeaker(commsManager.getRemoteSpeaker());
+      setPermissionWarning(commsManager.getPermissionWarning());
     });
     return () => unsub();
   }, []);
@@ -62,11 +69,11 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
   // Global pointer release listener (guarantees PTT stops even if released outside button)
   useEffect(() => {
     const handleGlobalRelease = () => {
-      if (isPointerDownRef.current) {
+      if (!isToggleMode && isPointerDownRef.current) {
         isPointerDownRef.current = false;
         const duration = Date.now() - pressStartTimeRef.current;
-        if (duration >= 250) {
-          handlePttEnd();
+        if (duration >= 200) {
+          commsManager.releasePtt();
         }
       }
     };
@@ -80,7 +87,7 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
       window.removeEventListener('touchend', handleGlobalRelease);
       window.removeEventListener('touchcancel', handleGlobalRelease);
     };
-  }, []);
+  }, [isToggleMode]);
 
   // Keyboard spacebar listener for PTT
   useEffect(() => {
@@ -88,14 +95,15 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
       const tag = document.activeElement?.tagName || '';
       if (e.code === 'Space' && !e.repeat && !['INPUT', 'TEXTAREA'].includes(tag)) {
         e.preventDefault();
-        handlePttStart();
+        radioAudio.resumeContext();
+        commsManager.pressPtt();
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
       const tag = document.activeElement?.tagName || '';
       if (e.code === 'Space' && !['INPUT', 'TEXTAREA'].includes(tag)) {
         e.preventDefault();
-        handlePttEnd();
+        commsManager.releasePtt();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -104,28 +112,9 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedTargetId, members]);
+  }, []);
 
-  const handlePttStart = async () => {
-    radioAudio.resumeContext();
-    if (typeof window !== 'undefined' && (window as any).NexusNative?.ensureMediaPermissions) {
-      try { (window as any).NexusNative.ensureMediaPermissions(); } catch {}
-    }
-    const target = selectedTargetId === 'all' 
-      ? undefined 
-      : members.find(m => m.id === selectedTargetId);
-    await commsManager.openRadio(target);
-    await commsManager.pressPtt();
-    setIsPttPressed(true);
-    setTransmissionCount(c => c + 1);
-  };
-
-  const handlePttEnd = () => {
-    commsManager.releasePtt();
-    setIsPttPressed(false);
-  };
-
-  const handlePointerDownAction = (e: React.PointerEvent<HTMLButtonElement>) => {
+  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     try {
       if (e.cancelable) e.preventDefault();
       e.stopPropagation();
@@ -140,22 +129,22 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
     } catch {}
 
     radioAudio.resumeContext();
-    if (typeof window !== 'undefined' && (window as any).NexusNative?.ensureMediaPermissions) {
-      try { (window as any).NexusNative.ensureMediaPermissions(); } catch {}
-    }
 
-    if (commsManager.isPttActive()) {
-      isPointerDownRef.current = false;
-      handlePttEnd();
+    if (isToggleMode) {
+      if (commsManager.isPttActive()) {
+        commsManager.releasePtt();
+      } else {
+        commsManager.pressPtt();
+      }
       return;
     }
 
     isPointerDownRef.current = true;
     pressStartTimeRef.current = now;
-    handlePttStart();
+    commsManager.pressPtt();
   };
 
-  const handlePointerUpAction = (e: React.PointerEvent<HTMLButtonElement>) => {
+  const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
     try {
       if (e.cancelable) e.preventDefault();
       e.stopPropagation();
@@ -165,67 +154,99 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch {}
 
+    if (isToggleMode) return;
+
     if (!isPointerDownRef.current) return;
     isPointerDownRef.current = false;
     const duration = Date.now() - pressStartTimeRef.current;
 
-    if (duration >= 300) {
-      handlePttEnd();
+    if (duration >= 200) {
+      commsManager.releasePtt();
     }
   };
 
-  // Other circle members
   const otherMembers = members.filter(m => m.id !== currentMember.id);
   const targetMember = selectedTargetId === 'all' 
     ? null 
     : members.find(m => m.id === selectedTargetId);
 
   return (
-    <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 flex flex-col h-full max-h-[580px] shadow-xs overflow-y-auto">
+    <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 flex flex-col h-full max-h-[620px] shadow-xs overflow-y-auto">
       
       {/* Station Header */}
       <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
-        <div className="flex items-center gap-2">
-          <div className="p-2 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
-            <Radio className="w-5 h-5" />
+        <div className="flex items-center gap-2.5">
+          <div className="p-2.5 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/80 shadow-xs">
+            <RadioTower className="w-5 h-5" />
           </div>
           <div>
             <div className="flex items-center gap-1.5">
-              <h4 className="font-extrabold text-slate-800 dark:text-slate-100 text-sm">
+              <h4 className="font-extrabold text-slate-800 dark:text-slate-100 text-sm tracking-tight">
                 Tactical Walkie-Talkie
               </h4>
-              <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
+              <span className="text-[9px] px-1.5 py-0.5 rounded-full font-mono font-bold bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800">
                 P2P LIVE
               </span>
             </div>
             <p className="text-[11px] text-slate-500 dark:text-slate-400">
-              Frequency: {circleName} • PIN {circlePin}
+              {circleName} • Room #{circlePin}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-1 text-[10px] text-slate-400 font-mono">
-          <Signal className="w-3.5 h-3.5 text-emerald-500" />
-          <span>STUN ACTIVE</span>
+        <div className="flex items-center gap-2">
+          {/* Mode Switcher: Hold vs Click Toggle */}
+          <button
+            type="button"
+            onClick={() => setIsToggleMode(prev => !prev)}
+            className={`px-2.5 py-1 rounded-xl text-[10px] font-bold border transition-all cursor-pointer ${
+              isToggleMode
+                ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-slate-400'
+            }`}
+            title="Switch between Hold to Speak and 1-Click Hands-free mode"
+          >
+            {isToggleMode ? 'Mode: Click to Talk' : 'Mode: Hold to Talk'}
+          </button>
         </div>
       </div>
+
+      {/* Permission Warning Notice if mic blocked */}
+      {permissionWarning && (
+        <div className="mt-2.5 p-2.5 rounded-2xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800/80 text-amber-800 dark:text-amber-200 text-xs flex items-center justify-between gap-2 shadow-xs">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span className="truncate text-[11px]">{permissionWarning}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => commsManager.retryMediaPermissions()}
+            className="px-2 py-0.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-[10px] shrink-0 transition-colors"
+          >
+            Allow Mic
+          </button>
+        </div>
+      )}
 
       {/* Channel Selector Chips */}
       <div className="mt-3">
         <div className="text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1.5 flex items-center justify-between">
-          <span>Active Radio Channel:</span>
-          <span className="text-[10px] text-blue-600 dark:text-blue-400 font-medium">
-            {selectedTargetId === 'all' ? 'All-Call Broadcast' : `Private: ${targetMember?.name}`}
+          <span className="flex items-center gap-1">
+            <Headphones className="w-3.5 h-3.5 text-indigo-500" />
+            <span>Target Channel:</span>
+          </span>
+          <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-semibold">
+            {selectedTargetId === 'all' ? 'All Members Broadcast' : `Private: ${targetMember?.name}`}
           </span>
         </div>
-        <div className="flex gap-1.5 overflow-x-auto pb-1 text-xs">
+        <div className="flex gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
           <button
             type="button"
             onClick={() => setSelectedTargetId('all')}
             className={`px-3 py-1.5 rounded-xl border flex items-center gap-1.5 font-bold transition-all cursor-pointer whitespace-nowrap text-xs ${
               selectedTargetId === 'all'
-                ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
-                : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-blue-400'
+                ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-indigo-400'
             }`}
           >
             <Users className="w-3.5 h-3.5" />
@@ -239,8 +260,8 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
               onClick={() => setSelectedTargetId(m.id)}
               className={`px-3 py-1.5 rounded-xl border flex items-center gap-1.5 font-bold transition-all cursor-pointer whitespace-nowrap text-xs ${
                 selectedTargetId === m.id
-                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
-                  : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-blue-400'
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-indigo-400'
               }`}
             >
               <span>{m.avatar || '👤'}</span>
@@ -250,31 +271,31 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
         </div>
       </div>
 
-      {/* Main Tactical Radio Visualizer Deck */}
+      {/* Main Tactical Radio Deck */}
       <div className="my-auto py-4 flex flex-col items-center justify-center text-center">
         {/* Status Callout Banner */}
         {remoteSpeaker?.isSpeaking ? (
-          <div className="mb-3 px-3.5 py-1 rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/40 text-xs font-bold font-mono animate-pulse">
+          <div className="mb-3 px-4 py-1.5 rounded-full bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800 text-xs font-bold font-mono tracking-wide animate-pulse">
             RADIO RECEIVING // {remoteSpeaker.name.toUpperCase()} SPEAKING
           </div>
         ) : isPttPressed ? (
-          <div className="mb-3 px-3.5 py-1 rounded-full bg-red-600/20 text-red-600 dark:text-red-400 border border-red-500/40 text-xs font-bold font-mono animate-pulse">
-            TRANSMITTING AUDIO // MIC LIVE
+          <div className="mb-3 px-4 py-1.5 rounded-full bg-rose-100 dark:bg-rose-950/70 text-rose-700 dark:text-rose-400 border border-rose-300 dark:border-rose-800 text-xs font-bold font-mono tracking-wide animate-pulse">
+            TRANSMITTING LIVE // MIC OPEN
           </div>
         ) : (
-          <div className="mb-3 px-3 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 text-xs font-mono">
-            RADIO STANDBY // CHANNEL CLEAR
+          <div className="mb-3 px-3.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-400 text-xs font-mono">
+            CHANNEL STANDBY // READY TO TRANSMIT
           </div>
         )}
 
-        {/* Live Audio Waves */}
+        {/* Live Audio Wave Visualizer */}
         <div className="flex items-center gap-1.5 h-10 mb-4">
           {[35, 65, 95, 50, 85, 100, 75, 90, 45, 80].map((h, i) => (
             <span
               key={i}
               className={`w-1.5 rounded-full transition-all duration-75 ${
                 isPttPressed
-                  ? 'bg-red-500 animate-pulse'
+                  ? 'bg-rose-500 animate-pulse'
                   : remoteSpeaker?.isSpeaking
                     ? 'bg-emerald-500 animate-pulse'
                     : 'bg-slate-300 dark:bg-slate-700 opacity-40'
@@ -287,39 +308,41 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
           ))}
         </div>
 
-        {/* THE BIG PUSH-TO-TALK BUTTON */}
+        {/* THE PUSH-TO-TALK BUTTON */}
         <button
           type="button"
-          onPointerDown={handlePointerDownAction}
-          onPointerUp={handlePointerUpAction}
-          onPointerCancel={handlePointerUpAction}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
           onContextMenu={(e) => e.preventDefault()}
-          className={`relative w-40 h-40 sm:w-44 sm:h-44 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-2xl touch-none ${
+          className={`relative w-40 h-40 sm:w-44 sm:h-44 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-xl touch-none ${
             isPttPressed
-              ? 'bg-gradient-to-b from-red-600 to-red-700 text-white ring-8 ring-red-500/30 shadow-red-600/50 scale-102'
-              : 'bg-gradient-to-b from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white ring-8 ring-blue-500/20 shadow-blue-600/30'
+              ? 'bg-gradient-to-b from-rose-600 to-rose-700 text-white ring-8 ring-rose-500/30 shadow-rose-600/40 scale-102'
+              : 'bg-gradient-to-b from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white ring-8 ring-indigo-500/20 shadow-indigo-600/30'
           }`}
           style={{ touchAction: 'none', WebkitUserSelect: 'none', userSelect: 'none', WebkitTouchCallout: 'none' }}
         >
           <Radio className={`w-11 h-11 mb-1.5 pointer-events-none ${isPttPressed ? 'animate-bounce' : ''}`} />
           <span className="font-black text-sm tracking-wider uppercase pointer-events-none">
-            {isPttPressed ? 'LIVE TRANSMITTING' : 'PUSH TO TALK'}
+            {isPttPressed ? 'TRANSMITTING' : 'PUSH TO TALK'}
           </span>
-          <span className="text-[10px] text-blue-200 mt-0.5 pointer-events-none">
-            {isPttPressed ? 'Release or Click to Send' : 'Hold to Speak or Click to Start'}
+          <span className="text-[10px] text-indigo-200 mt-0.5 pointer-events-none font-medium">
+            {isPttPressed 
+              ? (isToggleMode ? 'Click to Finish' : 'Release to Send')
+              : (isToggleMode ? 'Click to Start' : 'Hold to Speak')}
           </span>
         </button>
 
-        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-3 max-w-xs">
-          Direct P2P audio • Sub-100ms latency across cities or room • Synthesized roger beeps
+        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-3 max-w-xs font-medium">
+          Instant voice bursts across cities & rooms • Auto-squelch roger beeps
         </p>
       </div>
 
-      {/* Member Video & Direct Comms Quick Panel */}
+      {/* Member Video & Comms Quick Panel */}
       <div className="pt-3 border-t border-slate-100 dark:border-slate-800">
         <div className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 flex items-center justify-between">
           <span>Circle Members ({members.length})</span>
-          <span className="text-[10px] text-slate-400 font-normal">Direct Video & Audio</span>
+          <span className="text-[10px] text-slate-400 font-normal">HD Video & Radio Channels</span>
         </div>
 
         <div className="space-y-1.5">
@@ -328,7 +351,7 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
             return (
               <div
                 key={m.id}
-                className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 flex items-center justify-between gap-2"
+                className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-700/80 flex items-center justify-between gap-2"
               >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <div className="w-8 h-8 rounded-xl bg-white dark:bg-slate-700 flex items-center justify-center text-base shadow-xs shrink-0">
@@ -352,7 +375,7 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
                     <button
                       type="button"
                       onClick={() => onStartVideoCall(m)}
-                      className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1 shadow-sm cursor-pointer transition-all active:scale-95"
+                      className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1 shadow-xs cursor-pointer transition-all active:scale-95"
                       title={`Start HD Video Call with ${m.name}`}
                     >
                       <Video className="w-3.5 h-3.5" />
@@ -361,19 +384,16 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
                   )}
                   <button
                     type="button"
-                    onClick={() => {
-                      setSelectedTargetId(m.id);
-                      radioAudio.playPttStartChirp();
-                    }}
+                    onClick={() => setSelectedTargetId(m.id)}
                     className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all cursor-pointer ${
                       selectedTargetId === m.id
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-slate-200 dark:bg-slate-700 hover:bg-blue-100 text-slate-700 dark:text-slate-200'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'bg-slate-200 dark:bg-slate-700 hover:bg-indigo-100 dark:hover:bg-indigo-950 text-slate-700 dark:text-slate-200'
                     }`}
                     title={`Select Radio Channel for ${m.name}`}
                   >
                     <Radio className="w-3.5 h-3.5" />
-                    <span>{isSelf ? 'Test' : 'Radio'}</span>
+                    <span>{isSelf ? 'My Mic' : 'Radio'}</span>
                   </button>
                 </div>
               </div>

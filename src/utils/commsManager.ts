@@ -3,13 +3,11 @@
  * 
  * Powered by WebRTC, PeerJS & Firestore Hybrid Signaling.
  * Features:
- * - Dual-Engine Walkie-Talkie: Real-time Opus WebRTC streaming + instant voice burst packets.
- * - Hardware Echo Cancellation, Noise Suppression & Auto Gain Control.
- * - Walkie-Talkie Push-to-Talk (PTT) with instant audio streaming, squelch chirps & roger beeps.
- * - HD Live Video Calling with front/back camera toggling and Picture-in-Picture (PIP).
- * - 5-Stage Progressive Media Fallback: Guarantees calls & radio NEVER cut.
- * - Firestore Signaling Bridge: Instant audio delivery across cities and carrier networks.
- * - Automatic Peer ID Collision recovery and multiple redundant STUN servers.
+ * - Pre-warmed microphone stream: 0ms Push-to-Talk latency without hardware lag.
+ * - Redundant STUN & OpenRelay TURN servers for cross-carrier mobile/laptop traversal.
+ * - Single-channel audio routing: zero feedback, echo, or doubled sound streams.
+ * - Voice burst deduplication: prevents repeated or cascading audio bursts.
+ * - Clean call state management: guarantees ringtones halt the instant a call is answered/ended.
  */
 
 import { Peer, MediaConnection, DataConnection } from 'peerjs';
@@ -56,6 +54,7 @@ export type SignalBridgeHandler = (data: {
     timestamp: number;
   } | null;
   radioBurst?: {
+    burstId?: string;
     senderId: string;
     senderName: string;
     audioData: string;
@@ -63,6 +62,29 @@ export type SignalBridgeHandler = (data: {
     targetMemberId?: string;
   } | null;
 }) => void;
+
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:openrelay.metered.ca:80' },
+  {
+    urls: 'turn:openrelay.metered.ca:80',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  }
+];
 
 export class CommsManager {
   private peer: Peer | null = null;
@@ -74,6 +96,7 @@ export class CommsManager {
   // Active Media Streams & Recorders
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
+  private prewarmedMicStream: MediaStream | null = null;
   private activeMediaConnection: MediaConnection | null = null;
   private broadcastMediaConnections: Map<string, MediaConnection> = new Map();
   private dataConnections: Map<string, DataConnection> = new Map();
@@ -88,11 +111,11 @@ export class CommsManager {
   private isRemoteSpeaking: boolean = false;
   private permissionWarning: string | null = null;
   private handledCallTimestamps: Set<number> = new Set();
+  private handledBurstIds: Set<string> = new Set();
   private pttAutoTimeout: any = null;
 
-  // Audio elements for playback
-  private liveAudioElement: HTMLAudioElement | null = null;
-  private voiceBurstAudioElement: HTMLAudioElement | null = null;
+  // Single dedicated audio element for radio voice burst playback
+  private radioAudioElement: HTMLAudioElement | null = null;
 
   // Signal Bridge to Firestore
   private signalBridge: SignalBridgeHandler | null = null;
@@ -102,13 +125,12 @@ export class CommsManager {
 
   constructor() {
     if (typeof window !== 'undefined') {
-      this.getOrCreateLiveAudioElement();
-      this.getOrCreateVoiceBurstAudioElement();
+      this.getOrCreateRadioAudioElement();
     }
   }
 
-  private createAudioElement(): HTMLAudioElement {
-    if (typeof document !== 'undefined') {
+  private getOrCreateRadioAudioElement(): HTMLAudioElement {
+    if (!this.radioAudioElement && typeof document !== 'undefined') {
       try {
         const el = document.createElement('audio');
         el.autoplay = true;
@@ -116,45 +138,13 @@ export class CommsManager {
         el.style.display = 'none';
         if (document.body) {
           document.body.appendChild(el);
-        } else {
-          document.addEventListener('DOMContentLoaded', () => {
-            if (document.body && !document.body.contains(el)) {
-              document.body.appendChild(el);
-            }
-          });
         }
-        return el;
+        this.radioAudioElement = el;
       } catch {
-        const el = new Audio();
-        el.autoplay = true;
-        return el;
+        this.radioAudioElement = new Audio();
       }
     }
-    return new Audio();
-  }
-
-  public getOrCreateLiveAudioElement(): HTMLAudioElement {
-    if (!this.liveAudioElement) {
-      this.liveAudioElement = this.createAudioElement();
-    }
-    if (typeof document !== 'undefined' && document.body && !document.body.contains(this.liveAudioElement)) {
-      try { document.body.appendChild(this.liveAudioElement); } catch {}
-    }
-    return this.liveAudioElement;
-  }
-
-  public getOrCreateVoiceBurstAudioElement(): HTMLAudioElement {
-    if (!this.voiceBurstAudioElement) {
-      this.voiceBurstAudioElement = this.createAudioElement();
-    }
-    if (typeof document !== 'undefined' && document.body && !document.body.contains(this.voiceBurstAudioElement)) {
-      try { document.body.appendChild(this.voiceBurstAudioElement); } catch {}
-    }
-    return this.voiceBurstAudioElement;
-  }
-
-  public getOrCreateAudioElement(): HTMLAudioElement {
-    return this.getOrCreateLiveAudioElement();
+    return this.radioAudioElement || new Audio();
   }
 
   public setSignalBridge(bridge: SignalBridgeHandler | null) {
@@ -221,45 +211,68 @@ export class CommsManager {
   }
 
   /**
+   * Pre-warm microphone in advance so PTT triggers immediately with ZERO hardware spin-up latency.
+   */
+  public async prewarmMic(): Promise<MediaStream | null> {
+    if (this.prewarmedMicStream && this.prewarmedMicStream.getAudioTracks().some(t => t.readyState === 'live')) {
+      return this.prewarmedMicStream;
+    }
+
+    try {
+      if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          },
+          video: false
+        });
+        // Keep track alive but muted until PTT is held
+        stream.getAudioTracks().forEach(t => { t.enabled = false; });
+        this.prewarmedMicStream = stream;
+        return stream;
+      }
+    } catch (e) {
+      console.warn('Pre-warming microphone skipped:', e);
+    }
+    return null;
+  }
+
+  /**
    * Initialize PeerJS with the user's circle and device credentials.
+   * Safe to call repeatedly: will NOT destroy existing open peer if credentials match!
    */
   public initialize(circleId: string, member: DeviceMember, members: DeviceMember[]) {
     this.circleId = circleId;
     this.currentMember = member;
     this.membersList = members;
 
+    // If peer is already open and valid, just update members
+    if (this.peer && !this.peer.destroyed && this.peer.open) {
+      return;
+    }
+
     const basePeerId = this.getPeerIdForMember(member.id);
-    if (this.peer && this.myPeerId === basePeerId && !this.peer.destroyed) {
-      return; // Already active with same circle and credentials
-    }
-
-    if (this.peer) {
-      this.cleanup();
-    }
-
-    this.circleId = circleId;
-    this.currentMember = member;
-    this.membersList = members;
     this.createPeer(basePeerId);
   }
 
+  public updateMembersList(members: DeviceMember[]) {
+    this.membersList = members;
+  }
+
   private createPeer(peerId: string) {
+    if (this.peer && !this.peer.destroyed) {
+      try { this.peer.destroy(); } catch {}
+    }
+
     this.myPeerId = peerId;
 
     try {
       this.peer = new Peer(peerId, {
         debug: 1,
         config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:stun3.l.google.com:19302' },
-            { urls: 'stun:stun4.l.google.com:19302' },
-            { urls: 'stun:stun.services.mozilla.com' },
-            { urls: 'stun:global.stun.twilio.com:3478' },
-            { urls: 'stun:stun.relay.metered.ca:80' }
-          ]
+          iceServers: ICE_SERVERS
         }
       });
 
@@ -282,11 +295,8 @@ export class CommsManager {
 
       this.peer.on('error', (err: any) => {
         if (err.type === 'unavailable-id') {
-          console.warn('Peer ID collision or open in another tab. Generating unique sub-peer ID...');
+          console.warn('Peer ID collision. Generating unique sub-peer ID...');
           const fallbackId = `${peerId}_${Math.random().toString(36).substring(2, 7)}`;
-          if (this.peer) {
-            try { this.peer.destroy(); } catch {}
-          }
           this.createPeer(fallbackId);
         } else {
           console.warn('PeerJS tactical comms note:', err);
@@ -319,10 +329,6 @@ export class CommsManager {
     });
   }
 
-  public updateMembersList(members: DeviceMember[]) {
-    this.membersList = members;
-  }
-
   /**
    * Handle incoming call triggered via Firestore real-time signaling.
    */
@@ -342,11 +348,11 @@ export class CommsManager {
     }
 
     if (this.handledCallTimestamps.has(callData.timestamp)) {
-      return; // Already handled or alerted for this call
+      return; // Already handled
     }
 
     if (this.incomingCall && this.incomingCall.callerId === callData.callerId) {
-      return; // Already alerting for this incoming call
+      return;
     }
 
     this.handledCallTimestamps.add(callData.timestamp);
@@ -365,25 +371,16 @@ export class CommsManager {
   }
 
   /**
-   * Universal handler to bind incoming WebRTC MediaStream to UI and dedicated audio decoder.
+   * Universal handler to bind incoming WebRTC MediaStream.
    */
   private setupRemoteStream(remoteMediaStream: MediaStream) {
+    radioAudio.stopIncomingCallRingtone();
     radioAudio.playCallConnected();
     this.remoteStream = remoteMediaStream;
     if (this.session) {
       this.session.status = 'connected';
     }
 
-    // Direct playback through dedicated live audio element
-    try {
-      const audio = this.getOrCreateLiveAudioElement();
-      if (audio.srcObject !== remoteMediaStream) {
-        audio.srcObject = remoteMediaStream;
-      }
-      audio.play().catch(() => {});
-    } catch {}
-
-    // Track dynamic changes in incoming audio/video tracks (e.g. video track resolving after audio)
     const notifyTracks = () => {
       this.notify();
     };
@@ -422,7 +419,7 @@ export class CommsManager {
     const isVideo = meta.type === 'video';
 
     if (isVideo) {
-      // 1. If WE are already calling this person (outgoing call in progress), auto-answer:
+      // If we are already calling this person (outgoing call collision), auto-answer:
       if (
         this.session &&
         (this.session.status === 'connecting' || this.session.status === 'connected') &&
@@ -453,7 +450,7 @@ export class CommsManager {
         return;
       }
 
-      // 2. Normal incoming video call -> Trigger ringing banner
+      // Normal incoming video call -> Trigger ringing banner
       radioAudio.startIncomingCallRingtone();
       this.incomingCall = {
         callId: call.peer,
@@ -467,18 +464,21 @@ export class CommsManager {
       };
       this.notify();
     } else {
-      // Tactical Walkie-Talkie Radio -> Auto-receive and patch audio through immediately!
-      radioAudio.playPttStartChirp();
+      // Tactical Walkie-Talkie Radio -> Auto-receive and patch audio through
       this.remoteSpeakerName = meta.callerName || 'Tactical Radio';
       this.isRemoteSpeaking = true;
 
-      // Answer immediately in receive-only mode (NEVER wait for mic getUserMedia!)
       try {
         call.answer();
       } catch {}
 
       call.on('stream', (remoteMediaStream) => {
-        this.setupRemoteStream(remoteMediaStream);
+        // Play directly through dedicated radio audio element
+        const audio = this.getOrCreateRadioAudioElement();
+        if (audio.srcObject !== remoteMediaStream) {
+          audio.srcObject = remoteMediaStream;
+        }
+        audio.play().catch(() => {});
       });
 
       call.on('close', () => {
@@ -504,29 +504,40 @@ export class CommsManager {
       if (data.type === 'PTT_START') {
         this.remoteSpeakerName = data.callerName || 'Member';
         this.isRemoteSpeaking = true;
-        radioAudio.playPttStartChirp();
         this.notify();
       } else if (data.type === 'PTT_STOP') {
         radioAudio.playRogerBeep();
         this.isRemoteSpeaking = false;
         this.notify();
       } else if (data.type === 'RADIO_VOICE_BURST' && data.audioData) {
-        this.playRadioAudioBurst(data.audioData, data.senderName || 'Radio Unit');
+        this.playRadioAudioBurst(data.audioData, data.senderName || 'Radio Unit', data.burstId);
       }
     });
   }
 
   /**
-   * Play an incoming high-fidelity radio voice transmission packet.
+   * Play an incoming high-fidelity radio voice transmission packet with deduplication.
    */
-  public playRadioAudioBurst(audioData: string, senderName: string) {
+  public playRadioAudioBurst(audioData: string, senderName: string, burstId?: string) {
     if (!audioData) return;
+
+    // Deduplicate so burst is NEVER played twice
+    const idKey = burstId || `${senderName}_${audioData.slice(0, 32)}`;
+    if (this.handledBurstIds.has(idKey)) return;
+    this.handledBurstIds.add(idKey);
+
+    // Keep handledBurstIds bounded to last 100 items
+    if (this.handledBurstIds.size > 100) {
+      const first = Array.from(this.handledBurstIds)[0];
+      this.handledBurstIds.delete(first);
+    }
+
     this.remoteSpeakerName = senderName;
     this.isRemoteSpeaking = true;
     radioAudio.playPttStartChirp();
     this.notify();
 
-    const audio = this.getOrCreateVoiceBurstAudioElement();
+    const audio = this.getOrCreateRadioAudioElement();
     audio.srcObject = null;
     audio.src = audioData;
     audio.play()
@@ -600,14 +611,10 @@ export class CommsManager {
   private async getLocalMedia(isVideo: boolean, facingMode: 'user' | 'environment' = 'user'): Promise<MediaStream> {
     this.permissionWarning = null;
 
-    // 0. Proactively trigger native Android permission prompt if inside Android APK shell
     if (typeof window !== 'undefined' && (window as any).NexusNative?.ensureMediaPermissions) {
-      try {
-        (window as any).NexusNative.ensureMediaPermissions();
-      } catch {}
+      try { (window as any).NexusNative.ensureMediaPermissions(); } catch {}
     }
 
-    // Check if existing localStream is still valid and has live tracks
     if (this.localStream) {
       const hasLiveVideo = this.localStream.getVideoTracks().some(t => t.readyState === 'live');
       const hasLiveAudio = this.localStream.getAudioTracks().some(t => t.readyState === 'live');
@@ -619,7 +626,7 @@ export class CommsManager {
     }
 
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      // Attempt 1: Full requested video + audio with flexible ideal constraints (safe on Android)
+      // Attempt 1: Full requested video + audio
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -651,23 +658,16 @@ export class CommsManager {
         console.warn('Comms: Attempt 2 simple boolean constraints note:', err2);
       }
 
-      // Attempt 3: Separate Video & Audio track acquisition (fixes Android WebView driver contention)
+      // Attempt 3: Separate Video & Audio track acquisition
       if (isVideo) {
         try {
           let videoTrack: MediaStreamTrack | null = null;
           let audioTrack: MediaStreamTrack | null = null;
 
           try {
-            const vStream = await navigator.mediaDevices.getUserMedia({
-              video: { facingMode: { ideal: facingMode } }
-            });
+            const vStream = await navigator.mediaDevices.getUserMedia({ video: true });
             videoTrack = vStream.getVideoTracks()[0] || null;
-          } catch {
-            try {
-              const vStreamFallback = await navigator.mediaDevices.getUserMedia({ video: true });
-              videoTrack = vStreamFallback.getVideoTracks()[0] || null;
-            } catch {}
-          }
+          } catch {}
 
           try {
             const aStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -689,12 +689,7 @@ export class CommsManager {
       // Attempt 4: Audio-Only fallback with canvas track if camera hardware failed
       if (isVideo) {
         try {
-          const audioStream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
-            video: false
-          });
-
-          // Create a synthetic canvas video track so WebRTC video sender doesn't fail
+          const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
           const canvas = document.createElement('canvas');
           canvas.width = 640;
           canvas.height = 480;
@@ -728,32 +723,9 @@ export class CommsManager {
       }
     }
 
-    // Attempt 5: Synthetic silent stream so call NEVER cuts even if mic is blocked
-    this.permissionWarning = 'Microphone/Camera blocked in browser address bar. Operating in receive-only mode.';
+    // Blank fallback MediaStream so app never crashes
+    this.permissionWarning = 'Microphone/Camera blocked. Check browser or app permissions.';
     this.notify();
-
-    try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (AudioCtx) {
-        const audioCtx = new AudioCtx();
-        const osc = audioCtx.createOscillator();
-        const dst = audioCtx.createMediaStreamDestination();
-        osc.connect(dst);
-        osc.start();
-        const dummyStream = dst.stream;
-        dummyStream.getAudioTracks().forEach(t => { t.enabled = false; });
-        this.localStream = dummyStream;
-        if (this.session) {
-          this.session.isMuted = true;
-          this.session.isVideoEnabled = false;
-        }
-        return dummyStream;
-      }
-    } catch (err5) {
-      console.warn('Comms: Attempt 5 synthetic stream failed:', err5);
-    }
-
-    // Attempt 6: Blank MediaStream
     const empty = new MediaStream();
     this.localStream = empty;
     return empty;
@@ -781,7 +753,7 @@ export class CommsManager {
   // ==========================================
 
   /**
-   * Start Walkie-Talkie Radio Mode (Opens radio HUD / Ready state)
+   * Start Walkie-Talkie Radio Mode (Opens radio HUD & pre-warms mic for instantaneous response)
    */
   public async openRadio(targetMember?: DeviceMember) {
     this.session = {
@@ -795,6 +767,8 @@ export class CommsManager {
       startedAt: Date.now()
     };
     this.notify();
+    // Pre-warm mic in background so 0 latency occurs when user presses PTT
+    this.prewarmMic().catch(() => {});
   }
 
   /**
@@ -804,10 +778,9 @@ export class CommsManager {
     if (this.isPttPressed) return;
     this.isPttPressed = true;
     this.notify();
-    radioAudio.playPttStartChirp();
     this.pttRecordedChunks = [];
 
-    // Auto-timeout after 20s if user forgot to click/release
+    // Auto-timeout after 20s if user forgot to release
     if (this.pttAutoTimeout) clearTimeout(this.pttAutoTimeout);
     this.pttAutoTimeout = setTimeout(() => {
       if (this.isPttPressed) {
@@ -816,7 +789,15 @@ export class CommsManager {
     }, 20000);
 
     try {
-      const stream = await this.getLocalMedia(false);
+      // Use pre-warmed mic stream if available (0ms instant recording!)
+      let stream = this.prewarmedMicStream;
+      if (!stream || !stream.getAudioTracks().some(t => t.readyState === 'live')) {
+        stream = await this.prewarmMic();
+      }
+      if (!stream) {
+        stream = await this.getLocalMedia(false);
+      }
+
       stream.getAudioTracks().forEach(t => { t.enabled = true; });
 
       // Start MediaRecorder for voice burst delivery
@@ -843,11 +824,12 @@ export class CommsManager {
         }
       }
 
+      // Subtle tactile click tone (does not bleed into mic)
+      radioAudio.playPttStartChirp();
+
       // Check if user already released while media was being acquired
       if (!this.isPttPressed) {
-        setTimeout(() => {
-          this.finishAndSendRecording();
-        }, 350);
+        this.finishAndSendRecording();
         return;
       }
 
@@ -862,21 +844,6 @@ export class CommsManager {
           type: 'PTT_START',
           callerName: this.currentMember?.name || 'Radio Unit'
         });
-
-        const remotePeerId = member.peerId || this.getPeerIdForMember(member.id);
-        if (this.peer && !this.peer.destroyed) {
-          try {
-            const call = this.peer.call(remotePeerId, stream, {
-              metadata: {
-                type: 'radio',
-                callerId: this.currentMember?.id,
-                callerName: this.currentMember?.name || 'Radio Unit',
-                callerAvatar: this.currentMember?.avatar
-              }
-            });
-            this.broadcastMediaConnections.set(member.id, call);
-          } catch {}
-        }
       });
 
       this.notify();
@@ -894,7 +861,6 @@ export class CommsManager {
     if (!this.isPttPressed) return;
     this.isPttPressed = false;
     this.notify();
-    radioAudio.playRogerBeep();
 
     if (this.pttAutoTimeout) {
       clearTimeout(this.pttAutoTimeout);
@@ -905,7 +871,14 @@ export class CommsManager {
   }
 
   private finishAndSendRecording() {
-    // Default to ALL circle members unless explicit 1-on-1 private whisper is active
+    // Mute mic track immediately so roger beep is NOT recorded
+    if (this.prewarmedMicStream) {
+      this.prewarmedMicStream.getAudioTracks().forEach(t => { t.enabled = false; });
+    }
+
+    // Play tactile roger beep to sender
+    radioAudio.playRogerBeep();
+
     const isDirect = Boolean(this.session?.targetMember && !this.session.isBroadcasting);
     const targetMemberId = isDirect && this.session?.targetMember?.id ? this.session.targetMember.id : 'all';
 
@@ -925,30 +898,30 @@ export class CommsManager {
         } catch {}
 
         this.mediaRecorder.onstop = () => {
-          if (this.localStream) {
-            this.localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
-            this.localStream = null;
-          }
-
           if (this.pttRecordedChunks.length > 0) {
             const audioBlob = new Blob(this.pttRecordedChunks, { type: mime });
             const reader = new FileReader();
             reader.onloadend = () => {
               const base64Audio = reader.result as string;
               if (base64Audio) {
+                const burstId = `${this.currentMember?.id || 'unit'}_${Date.now()}`;
+                this.handledBurstIds.add(burstId);
+
                 // 1. Direct transmit over DataChannel
                 targets.forEach(member => {
                   this.sendDataToMember(member, {
                     type: 'RADIO_VOICE_BURST',
+                    burstId,
                     audioData: base64Audio,
                     senderName: this.currentMember?.name || 'Radio Unit'
                   });
                 });
 
-                // 2. Transmit over Firestore signal bridge as guaranteed broadcast to ALL members!
+                // 2. Transmit over Firestore signal bridge as guaranteed fallback to ALL members!
                 if (this.signalBridge && this.currentMember) {
                   this.signalBridge({
                     radioBurst: {
+                      burstId,
                       senderId: this.currentMember.id,
                       senderName: this.currentMember.name || 'Radio Unit',
                       audioData: base64Audio,
@@ -966,26 +939,11 @@ export class CommsManager {
         this.mediaRecorder.stop();
       } catch (e) {
         console.warn('MediaRecorder stop note:', e);
-        if (this.localStream) {
-          this.localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
-          this.localStream = null;
-        }
-      }
-    } else {
-      if (this.localStream) {
-        this.localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
-        this.localStream = null;
       }
     }
 
     targets.forEach(member => {
       this.sendDataToMember(member, { type: 'PTT_STOP' });
-
-      const activeCall = this.broadcastMediaConnections.get(member.id);
-      if (activeCall) {
-        try { activeCall.close(); } catch {}
-        this.broadcastMediaConnections.delete(member.id);
-      }
     });
 
     this.notify();
@@ -996,7 +954,7 @@ export class CommsManager {
   // ==========================================
 
   /**
-   * Initiate an HD video call to a member (e.g. Surat ⇄ Nadiad).
+   * Initiate an HD video call to a member.
    */
   public async startVideoCall(targetMember: DeviceMember) {
     this.session = {
@@ -1010,11 +968,13 @@ export class CommsManager {
     };
     this.notify();
 
-    // 1. Acquire local media FIRST with progressive fallback - guarantees active camera/mic tracks
+    // 1. Acquire local media FIRST with progressive fallback
     const stream = await this.getLocalMedia(true, 'user');
     await this.ensurePeerOpen();
 
-    // 2. Publish call signal to Firestore so target phone rings with verified caller peer ID!
+    const targetPeerId = targetMember.peerId || this.getPeerIdForMember(targetMember.id);
+
+    // 2. Publish call signal to Firestore so target device receives notification with caller's peer ID
     if (this.signalBridge && this.currentMember) {
       this.signalBridge({
         activeCall: {
@@ -1031,11 +991,9 @@ export class CommsManager {
       });
     }
 
-    const remotePeerId = targetMember.peerId || this.getPeerIdForMember(targetMember.id);
-
     if (this.peer && !this.peer.destroyed) {
       try {
-        const call = this.peer.call(remotePeerId, stream, {
+        const call = this.peer.call(targetPeerId, stream, {
           metadata: {
             type: 'video',
             callerId: this.currentMember?.id,
@@ -1103,10 +1061,10 @@ export class CommsManager {
     };
     this.notify();
 
-    // 1. Acquire local media FIRST with progressive fallback - NEVER throws!
+    // 1. Acquire local media
     const stream = await this.getLocalMedia(true, 'user');
 
-    // 2. Signal connected state to Firestore bridge so caller knows call is answered and ringtone halts everywhere
+    // 2. Signal connected state to Firestore bridge so caller stops ringing
     if (this.signalBridge && this.currentMember) {
       this.signalBridge({
         activeCall: {
@@ -1117,7 +1075,7 @@ export class CommsManager {
           targetMemberId: this.currentMember.id,
           type: 'video',
           status: 'connected',
-          callerPeerId: this.myPeerId || this.getPeerIdForMember(this.currentMember.id),
+          callerPeerId: incoming.callerPeerId || '',
           timestamp: Date.now()
         }
       });
@@ -1141,7 +1099,7 @@ export class CommsManager {
         console.warn('Answer media connection error:', err);
       }
     } else if (incoming.callerPeerId && this.peer && !this.peer.destroyed) {
-      // Answer back via caller's peer ID if signaled through Firestore
+      // Reverse peer call if direct answer was not received
       try {
         const call = this.peer.call(incoming.callerPeerId, stream, {
           metadata: {
@@ -1261,10 +1219,10 @@ export class CommsManager {
       this.localStream = null;
     }
 
-    if (this.liveAudioElement) {
+    if (this.radioAudioElement) {
       try {
-        this.liveAudioElement.srcObject = null;
-        this.liveAudioElement.pause();
+        this.radioAudioElement.srcObject = null;
+        this.radioAudioElement.pause();
       } catch {}
     }
 
@@ -1288,6 +1246,10 @@ export class CommsManager {
    */
   public cleanup() {
     this.endCall();
+    if (this.prewarmedMicStream) {
+      this.prewarmedMicStream.getTracks().forEach(t => t.stop());
+      this.prewarmedMicStream = null;
+    }
     if (this.peer) {
       try { this.peer.destroy(); } catch {}
       this.peer = null;

@@ -1,10 +1,11 @@
 /**
- * Nexus Tactical Comms Modal & HUD
+ * Nexus Tactical Comms Modal & Video Call HUD
  * 
  * Provides:
- * 1. Tactical Walkie-Talkie (Push-to-Talk) with live wave meter & roger beeps.
- * 2. HD Live Video Calling with dual feed, PIP, camera flipping & military HUD.
+ * 1. HD Live Video Calling with dual video feeds (Main + PIP), flip camera & controls.
+ * 2. Tactical Walkie-Talkie with instant pre-warmed PTT & live wave meter.
  * 3. Incoming Call Toast with interactive Accept / Decline triggers.
+ * 4. Single-channel audio routing preventing echoing, screeching, and feedback loops.
  */
 
 import React, { useEffect, useRef, useState } from 'react';
@@ -30,7 +31,9 @@ import {
   Maximize2, 
   Minimize2,
   Volume2,
-  AlertTriangle
+  AlertTriangle,
+  RadioTower,
+  Sparkles
 } from 'lucide-react';
 
 interface CommsModalProps {
@@ -56,13 +59,49 @@ export const CommsModal: React.FC<CommsModalProps> = ({
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
   const [permissionWarning, setPermissionWarning] = useState<string | null>(commsManager.getPermissionWarning());
   const [streamTick, setStreamTick] = useState<number>(0);
+  const [isToggleMode, setIsToggleMode] = useState<boolean>(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  const pttButtonRef = useRef<HTMLButtonElement>(null);
   const isPttPointerDown = useRef<boolean>(false);
   const pttPressStartTime = useRef<number>(0);
   const lastPttActionTime = useRef<number>(0);
+
+  // Sync state with commsManager
+  useEffect(() => {
+    const unsubscribe = commsManager.subscribe(() => {
+      setSession(commsManager.getSession());
+      setIncomingCall(commsManager.getIncomingCall());
+      setIsPttPressed(commsManager.isPttActive());
+      setRemoteSpeaker(commsManager.getRemoteSpeaker());
+      setPermissionWarning(commsManager.getPermissionWarning());
+      setStreamTick(t => t + 1);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Global window release listener for safe PTT release
+  useEffect(() => {
+    const handleGlobalPttRelease = () => {
+      if (!isToggleMode && isPttPointerDown.current) {
+        isPttPointerDown.current = false;
+        const duration = Date.now() - pttPressStartTime.current;
+        if (duration >= 200) {
+          commsManager.releasePtt();
+        }
+      }
+    };
+    window.addEventListener('pointerup', handleGlobalPttRelease);
+    window.addEventListener('mouseup', handleGlobalPttRelease);
+    window.addEventListener('touchend', handleGlobalPttRelease);
+    window.addEventListener('touchcancel', handleGlobalPttRelease);
+    return () => {
+      window.removeEventListener('pointerup', handleGlobalPttRelease);
+      window.removeEventListener('mouseup', handleGlobalPttRelease);
+      window.removeEventListener('touchend', handleGlobalPttRelease);
+      window.removeEventListener('touchcancel', handleGlobalPttRelease);
+    };
+  }, [isToggleMode]);
 
   const handlePttDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     try {
@@ -79,13 +118,13 @@ export const CommsModal: React.FC<CommsModalProps> = ({
     } catch {}
 
     radioAudio.resumeContext();
-    if (typeof window !== 'undefined' && (window as any).NexusNative?.ensureMediaPermissions) {
-      try { (window as any).NexusNative.ensureMediaPermissions(); } catch {}
-    }
 
-    if (commsManager.isPttActive()) {
-      isPttPointerDown.current = false;
-      commsManager.releasePtt();
+    if (isToggleMode) {
+      if (commsManager.isPttActive()) {
+        commsManager.releasePtt();
+      } else {
+        commsManager.pressPtt();
+      }
       return;
     }
 
@@ -104,50 +143,16 @@ export const CommsModal: React.FC<CommsModalProps> = ({
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch {}
 
+    if (isToggleMode) return;
+
     if (!isPttPointerDown.current) return;
     isPttPointerDown.current = false;
     const duration = Date.now() - pttPressStartTime.current;
 
-    if (duration >= 300) {
+    if (duration >= 200) {
       commsManager.releasePtt();
     }
   };
-
-  // Global window release listener for safe PTT release even if pointer leaves button
-  useEffect(() => {
-    const handleGlobalPttRelease = () => {
-      if (isPttPointerDown.current) {
-        isPttPointerDown.current = false;
-        const duration = Date.now() - pttPressStartTime.current;
-        if (duration >= 250) {
-          commsManager.releasePtt();
-        }
-      }
-    };
-    window.addEventListener('pointerup', handleGlobalPttRelease);
-    window.addEventListener('mouseup', handleGlobalPttRelease);
-    window.addEventListener('touchend', handleGlobalPttRelease);
-    window.addEventListener('touchcancel', handleGlobalPttRelease);
-    return () => {
-      window.removeEventListener('pointerup', handleGlobalPttRelease);
-      window.removeEventListener('mouseup', handleGlobalPttRelease);
-      window.removeEventListener('touchend', handleGlobalPttRelease);
-      window.removeEventListener('touchcancel', handleGlobalPttRelease);
-    };
-  }, []);
-
-  // Sync state with commsManager
-  useEffect(() => {
-    const unsubscribe = commsManager.subscribe(() => {
-      setSession(commsManager.getSession());
-      setIncomingCall(commsManager.getIncomingCall());
-      setIsPttPressed(commsManager.isPttActive());
-      setRemoteSpeaker(commsManager.getRemoteSpeaker());
-      setPermissionWarning(commsManager.getPermissionWarning());
-      setStreamTick(t => t + 1);
-    });
-    return () => unsubscribe();
-  }, []);
 
   // Attach local and remote video streams
   useEffect(() => {
@@ -164,13 +169,8 @@ export const CommsModal: React.FC<CommsModalProps> = ({
       if (remoteVideoRef.current.srcObject !== remoteStream) {
         remoteVideoRef.current.srcObject = remoteStream;
       }
-      // Try playing unmuted; if autoplay policy on mobile/browser restricts it, fallback to muted so video renders immediately while liveAudioElement delivers the sound
       remoteVideoRef.current.play().catch((err) => {
-        console.warn('Remote video unmuted autoplay restricted, playing muted with audio element relay:', err);
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.muted = true;
-          remoteVideoRef.current.play().catch(() => {});
-        }
+        console.warn('Remote video playback note:', err);
       });
     }
   }, [session, session?.status, streamTick]);
@@ -189,50 +189,23 @@ export const CommsModal: React.FC<CommsModalProps> = ({
     return () => clearInterval(interval);
   }, [session?.status, session?.mode]);
 
-  // Spacebar hotkey for Walkie-Talkie Push-to-Talk
-  useEffect(() => {
-    if (!isOpen || session?.mode !== 'radio') return;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !e.repeat && document.activeElement?.tagName !== 'INPUT') {
-        e.preventDefault();
-        commsManager.pressPtt();
-      }
-    };
-
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && document.activeElement?.tagName !== 'INPUT') {
-        e.preventDefault();
-        commsManager.releasePtt();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-    };
-  }, [isOpen, session?.mode]);
-
   const formatTimer = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Other circle members
   const targetCandidates = members.filter(m => m.id !== currentMember.id);
 
-  // Render Incoming Call Toast (always visible on screen when ringing)
+  // Render Incoming Call Toast Banner
   const renderIncomingCallBanner = () => {
     if (!incomingCall) return null;
 
     return (
-      <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md bg-slate-900/95 dark:bg-slate-950/95 backdrop-blur-xl border border-blue-500/50 rounded-2xl shadow-2xl p-4 animate-bounce-slow text-white">
+      <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md bg-slate-900/95 dark:bg-slate-950/95 backdrop-blur-xl border border-indigo-500/50 rounded-3xl shadow-2xl p-4 text-white animate-bounce-slow">
         <div className="flex items-center gap-3">
           <div className="relative">
-            <div className="w-12 h-12 rounded-2xl bg-blue-600/30 flex items-center justify-center text-2xl border border-blue-400">
+            <div className="w-12 h-12 rounded-2xl bg-indigo-600/30 flex items-center justify-center text-2xl border border-indigo-400 shadow-xs">
               {incomingCall.callerAvatar || '👤'}
             </div>
             <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-500 rounded-full animate-ping"></span>
@@ -240,28 +213,28 @@ export const CommsModal: React.FC<CommsModalProps> = ({
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-1.5">
-              <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">
+              <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
                 Incoming {incomingCall.isVideo ? 'Video Call' : 'Radio Signal'}
               </span>
             </div>
             <h4 className="font-bold text-base text-slate-100 truncate mt-0.5">
               {incomingCall.callerName}
             </h4>
-            <p className="text-xs text-slate-400">Connecting from {circleName} grid…</p>
+            <p className="text-xs text-slate-400">Connecting in {circleName}…</p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => commsManager.declineIncomingCall()}
-              className="p-3 rounded-xl bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 transition-all cursor-pointer"
+              className="p-3 rounded-2xl bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 transition-all cursor-pointer shadow-xs active:scale-95"
               title="Decline"
             >
               <PhoneOff className="w-5 h-5" />
             </button>
             <button
               onClick={() => commsManager.acceptIncomingCall()}
-              className="p-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 transition-all cursor-pointer animate-pulse"
-              title="Accept Video"
+              className="p-3 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 transition-all cursor-pointer animate-pulse active:scale-95"
+              title="Accept Call"
             >
               <Video className="w-5 h-5" />
             </button>
@@ -271,7 +244,6 @@ export const CommsModal: React.FC<CommsModalProps> = ({
     );
   };
 
-  // If no session and no incoming call and not explicitly opened, render nothing
   if (!isOpen && !incomingCall && !session) {
     return null;
   }
@@ -288,133 +260,133 @@ export const CommsModal: React.FC<CommsModalProps> = ({
       {isMinimized && session && (
         <div 
           onClick={() => setIsMinimized(false)}
-          className="fixed bottom-24 right-5 z-[9990] bg-slate-900/90 dark:bg-slate-950/90 backdrop-blur-md border border-blue-500/40 shadow-xl rounded-full px-4 py-2 flex items-center gap-3 cursor-pointer text-white hover:scale-105 transition-all"
+          className="fixed bottom-24 right-5 z-[9990] bg-slate-900/95 backdrop-blur-md border border-indigo-500/40 shadow-2xl rounded-full px-4 py-2 flex items-center gap-3 cursor-pointer text-white hover:scale-105 transition-all"
         >
           <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></div>
-          <span className="text-xs font-semibold">
-            {session.mode === 'video' ? `Video Call (${formatTimer(callDuration)})` : 'Tactical Walkie-Talkie'}
+          <span className="text-xs font-bold">
+            {session.mode === 'video' ? `Live Video (${formatTimer(callDuration)})` : 'Tactical Radio Active'}
           </span>
           <Maximize2 className="w-4 h-4 text-slate-400" />
         </div>
       )}
 
-      {/* 3. Main Comms Modal / Full HUD */}
-      {isOpen && !isMinimized && (
-        <div className="fixed inset-0 z-[9980] flex items-center justify-center p-3 sm:p-5 bg-black/75 backdrop-blur-md">
-          <div className="w-full max-w-2xl bg-slate-900 dark:bg-slate-950 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+      {/* 3. Main Fullscreen Tactical Modal / HUD */}
+      {!isMinimized && (isOpen || session) && (
+        <div className="fixed inset-0 z-[9980] bg-black/80 backdrop-blur-md flex items-center justify-center p-2 sm:p-4 animate-fade-in">
+          <div className="relative w-full max-w-2xl bg-slate-950 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
             
-            {/* Top Tactical Header */}
-            <div className="px-5 py-3.5 bg-slate-800/60 border-b border-slate-800 flex items-center justify-between">
+            {/* Modal Top Bar */}
+            <div className="px-5 py-3.5 border-b border-slate-800 flex items-center justify-between bg-slate-900/90 text-white">
               <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/30">
-                  {session?.mode === 'video' ? <Video className="w-5 h-5" /> : <Radio className="w-5 h-5" />}
+                <div className="p-2 rounded-xl bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                  {session?.mode === 'video' ? <Video className="w-4 h-4" /> : <Radio className="w-4 h-4" />}
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-bold text-slate-100 text-sm tracking-wide">
-                      {session?.mode === 'video' ? 'TACTICAL VIDEO CALL' : 'TACTICAL WALKIE-TALKIE'}
-                    </h3>
-                    <span className="text-[10px] px-2 py-0.5 rounded-md font-mono bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                      ENCRYPTED P2P
+                  <h3 className="font-extrabold text-sm text-slate-100 flex items-center gap-2">
+                    {session?.mode === 'video' ? 'HD Live Video Comms' : 'Tactical Walkie-Talkie'}
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-mono bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                      SECURE P2P
                     </span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
-                    Frequency: {circleName} GRID // STUN RELAY ACTIVE
-                  </p>
+                  </h3>
+                  <p className="text-[11px] text-slate-400">{circleName} Emergency Grid</p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-2">
                 {session && (
                   <button
                     onClick={() => setIsMinimized(true)}
                     className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-                    title="Minimize"
+                    title="Minimize to floating widget"
                   >
                     <Minimize2 className="w-4 h-4" />
                   </button>
                 )}
                 <button
                   onClick={() => {
-                    if (session) commsManager.endCall();
+                    if (session) {
+                      commsManager.endCall();
+                    }
                     onClose();
                   }}
                   className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-                  title="Close"
+                  title="Close Comms"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
 
-            {/* Mode Switcher Tabs if no active session */}
+            {/* Mode Selection Screen if no session active */}
             {!session && (
-              <div className="p-5 flex-1 overflow-y-auto">
-                <div className="text-center max-w-md mx-auto py-4">
-                  <div className="w-16 h-16 rounded-3xl bg-blue-600/10 text-blue-400 flex items-center justify-center mx-auto mb-3 border border-blue-500/30">
-                    <Radio className="w-8 h-8" />
+              <div className="p-6 flex-1 overflow-y-auto">
+                <div className="text-center max-w-md mx-auto py-2">
+                  <div className="w-16 h-16 rounded-3xl bg-indigo-600/15 text-indigo-400 flex items-center justify-center mx-auto mb-3 border border-indigo-500/30">
+                    <RadioTower className="w-8 h-8" />
                   </div>
-                  <h4 className="text-lg font-bold text-slate-100">Tactical Circle Comms</h4>
+                  <h4 className="text-lg font-bold text-slate-100">Direct Family Comms Deck</h4>
                   <p className="text-xs text-slate-400 mt-1">
-                    Instant sub-second audio & HD live video direct to circle members across cities or in the same room without 3rd party apps.
+                    Instant sub-second walkie-talkie audio & HD live video direct between members without external apps.
                   </p>
 
-                  <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <button
                       onClick={() => commsManager.openRadio()}
-                      className="p-4 rounded-2xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700/80 text-left flex flex-col gap-2 hover:border-blue-500 transition-all cursor-pointer group"
+                      className="p-4 rounded-2xl bg-slate-900 hover:bg-slate-800/80 border border-slate-800 hover:border-indigo-500 text-left flex flex-col gap-2 transition-all cursor-pointer group shadow-xs"
                     >
-                      <div className="p-2.5 rounded-xl bg-blue-600/20 text-blue-400 w-fit group-hover:scale-110 transition-transform">
+                      <div className="p-2.5 rounded-xl bg-indigo-600/20 text-indigo-400 w-fit group-hover:scale-110 transition-transform">
                         <Radio className="w-5 h-5" />
                       </div>
                       <div>
                         <div className="font-bold text-slate-200 text-sm">Circle Walkie-Talkie</div>
-                        <div className="text-[11px] text-slate-400 mt-0.5">Broadcast push-to-talk audio to all circle members</div>
+                        <div className="text-[11px] text-slate-400 mt-0.5">Broadcast push-to-talk audio to everyone</div>
                       </div>
                     </button>
 
-                    <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-800 text-left flex flex-col gap-2">
-                      <div className="p-2.5 rounded-xl bg-purple-600/20 text-purple-400 w-fit">
+                    <div className="p-4 rounded-2xl bg-slate-900/40 border border-slate-800 text-left flex flex-col gap-2">
+                      <div className="p-2.5 rounded-xl bg-emerald-600/20 text-emerald-400 w-fit">
                         <Video className="w-5 h-5" />
                       </div>
                       <div>
-                        <div className="font-bold text-slate-200 text-sm">Direct Video Call</div>
-                        <div className="text-[11px] text-slate-400 mt-0.5">Pick any member below to initiate direct HD video</div>
+                        <div className="font-bold text-slate-200 text-sm">Direct HD Video</div>
+                        <div className="text-[11px] text-slate-400 mt-0.5">Select any online member below to call</div>
                       </div>
                     </div>
                   </div>
 
-                  {/* Target Member Quick Selection */}
-                  <div className="mt-6 text-left">
-                    <label className="text-xs font-semibold uppercase text-slate-400 tracking-wider">
-                      Circle Members Online ({targetCandidates.length})
+                  {/* Members Selection List */}
+                  <div className="mt-5 text-left">
+                    <label className="text-[11px] font-bold uppercase text-slate-400 tracking-wider">
+                      Circle Members ({targetCandidates.length})
                     </label>
                     <div className="mt-2 space-y-2">
                       {targetCandidates.length === 0 ? (
                         <div className="text-center py-6 text-xs text-slate-500">
-                          Waiting for other circle members to join grid…
+                          Waiting for family members to join circle…
                         </div>
                       ) : (
                         targetCandidates.map(m => (
                           <div
                             key={m.id}
-                            className="p-3 rounded-2xl bg-slate-800/50 border border-slate-800 flex items-center justify-between hover:border-slate-700 transition-all"
+                            className="p-3 rounded-2xl bg-slate-900 border border-slate-800/80 flex items-center justify-between hover:border-slate-700 transition-all"
                           >
-                            <div className="flex items-center gap-3">
-                              <div className="w-10 h-10 rounded-xl bg-slate-700 flex items-center justify-center text-xl">
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-10 h-10 rounded-2xl bg-slate-800 flex items-center justify-center text-xl shrink-0">
                                 {m.avatar || '👤'}
                               </div>
-                              <div>
-                                <h5 className="font-bold text-sm text-slate-200">{m.name}</h5>
-                                <span className="text-[11px] text-slate-400">{m.role || 'Member'}</span>
+                              <div className="truncate">
+                                <h5 className="font-bold text-sm text-slate-200 truncate">{m.name}</h5>
+                                <span className="text-[11px] text-slate-400 block truncate">
+                                  {m.role || 'Member'} {m.currentPlace ? `• At ${m.currentPlace}` : ''}
+                                </span>
                               </div>
                             </div>
 
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 shrink-0">
                               <button
                                 onClick={() => commsManager.openRadio(m)}
-                                className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white text-xs font-semibold border border-blue-500/30 flex items-center gap-1.5 transition-all cursor-pointer"
-                                title="Open Walkie-Talkie Channel"
+                                className="px-3 py-1.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600 text-indigo-400 hover:text-white text-xs font-semibold border border-indigo-500/30 flex items-center gap-1.5 transition-all cursor-pointer"
+                                title="Open Radio"
                               >
                                 <Radio className="w-3.5 h-3.5" />
                                 <span>Radio</span>
@@ -439,8 +411,8 @@ export const CommsModal: React.FC<CommsModalProps> = ({
 
             {/* LIVE VIDEO CALL VIEW */}
             {session && session.mode === 'video' && (
-              <div className="relative flex-1 bg-black min-h-[380px] sm:min-h-[460px] flex items-center justify-center overflow-hidden">
-                {/* Remote Video Stream (Main Feed) */}
+              <div className="relative flex-1 bg-black min-h-[400px] sm:min-h-[480px] flex items-center justify-center overflow-hidden">
+                {/* Main Remote Video Element */}
                 <video
                   ref={remoteVideoRef}
                   autoPlay
@@ -448,84 +420,84 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                   className="w-full h-full object-cover"
                 />
 
-                {/* Connecting / No Feed Fallback */}
+                {/* Connecting Screen */}
                 {session.status === 'connecting' && (
                   <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-10">
-                    <div className="w-20 h-20 rounded-full bg-blue-600/20 border-2 border-blue-500/50 flex items-center justify-center text-4xl mb-4 animate-pulse">
+                    <div className="w-20 h-20 rounded-3xl bg-indigo-600/20 border-2 border-indigo-500/50 flex items-center justify-center text-4xl mb-4 animate-pulse">
                       {session.targetMember?.avatar || '👤'}
                     </div>
                     <h4 className="text-xl font-bold text-white">Calling {session.targetMember?.name || 'Member'}…</h4>
-                    <p className="text-xs text-blue-400 mt-1 font-mono">ESTABLISHING WEBRTC PEER CONNECTION</p>
-                    <div className="mt-4 flex items-center gap-1.5 text-xs text-slate-400">
+                    <p className="text-xs text-indigo-400 mt-1 font-mono">ESTABLISHING ENCRYPTED WEBRTC P2P</p>
+                    <div className="mt-4 flex items-center gap-2 text-xs text-slate-400">
                       <Activity className="w-4 h-4 text-emerald-400 animate-spin" />
-                      <span>Negotiating STUN traversal between cities…</span>
+                      <span>Negotiating STUN/TURN connection…</span>
                     </div>
                   </div>
                 )}
 
-                {/* Active Call Video Buffering / Warmup Indicator */}
+                {/* Connected with no camera feed */}
                 {session.status === 'connected' && !hasRemoteVideo && (
-                  <div className="absolute inset-0 bg-slate-950/85 flex flex-col items-center justify-center p-6 text-center z-10 pointer-events-none">
-                    <div className="w-20 h-20 rounded-full bg-blue-600/20 border-2 border-blue-500/50 flex items-center justify-center text-4xl mb-4 animate-pulse">
+                  <div className="absolute inset-0 bg-slate-950/80 flex flex-col items-center justify-center p-6 text-center z-10 pointer-events-none">
+                    <div className="w-20 h-20 rounded-3xl bg-indigo-600/20 border-2 border-indigo-500/50 flex items-center justify-center text-4xl mb-4 animate-pulse">
                       {session.targetMember?.avatar || '👤'}
                     </div>
                     <h4 className="text-xl font-bold text-white">{session.targetMember?.name || 'Member'}</h4>
                     <p className="text-xs text-emerald-400 mt-1 font-mono">LIVE CALL CONNECTED</p>
                     <div className="mt-3 flex items-center gap-1.5 text-xs text-slate-400">
                       <Activity className="w-4 h-4 text-emerald-400 animate-spin" />
-                      <span>Connecting remote video feed…</span>
+                      <span>Streaming live audio • Video activating…</span>
                     </div>
                   </div>
                 )}
 
-                {/* Local Video Stream (PIP Feed in bottom right corner) */}
-                <div className="absolute bottom-20 right-4 w-32 h-44 sm:w-36 sm:h-48 rounded-2xl overflow-hidden border-2 border-slate-700 bg-slate-900 shadow-2xl z-20">
+                {/* Local Video Stream (PIP in bottom right) */}
+                <div className="absolute bottom-20 right-4 w-28 h-38 sm:w-36 sm:h-48 rounded-2xl overflow-hidden border-2 border-slate-700 bg-slate-900 shadow-2xl z-20">
                   <video
                     ref={localVideoRef}
                     autoPlay
                     playsInline
                     muted
-                    className="w-full h-full object-cover mirror"
+                    className="w-full h-full object-cover -scale-x-100"
                   />
-                  <div className="absolute top-1.5 left-2 px-1.5 py-0.5 rounded bg-black/60 text-[9px] text-white font-mono">
+                  <div className="absolute top-1.5 left-2 px-1.5 py-0.5 rounded-md bg-black/60 text-[9px] text-white font-mono font-bold">
                     YOU
                   </div>
                 </div>
 
-                {/* HUD Top Left: Telemetry & Duration */}
-                <div className="absolute top-4 left-4 z-20 bg-slate-950/70 backdrop-blur-md px-3.5 py-2 rounded-xl border border-slate-800 flex items-center gap-3 text-white text-xs">
+                {/* Telemetry Bar (Top Left) */}
+                <div className="absolute top-4 left-4 z-20 bg-slate-950/80 backdrop-blur-md px-3.5 py-2 rounded-2xl border border-slate-800 flex items-center gap-3 text-white text-xs">
                   <div className="flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
                     <span className="font-mono font-bold text-emerald-400">{formatTimer(callDuration)}</span>
                   </div>
                   <span className="text-slate-600">|</span>
-                  <span className="font-semibold">{session.targetMember?.name || 'Peer'}</span>
+                  <span className="font-bold">{session.targetMember?.name || 'Peer'}</span>
                 </div>
 
-                {/* Non-intrusive Media Permission Notice */}
+                {/* Permission Warning */}
                 {permissionWarning && (
-                  <div className="absolute top-16 left-4 right-4 z-30 p-2.5 rounded-2xl bg-amber-950/90 border border-amber-500/50 text-amber-200 text-xs backdrop-blur-md flex items-center justify-between gap-2 shadow-2xl animate-fade-in">
+                  <div className="absolute top-16 left-4 right-4 z-30 p-2.5 rounded-2xl bg-amber-950/90 border border-amber-500/50 text-amber-200 text-xs backdrop-blur-md flex items-center justify-between gap-2 shadow-2xl">
                     <div className="flex items-center gap-2 min-w-0">
                       <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
                       <span className="truncate">{permissionWarning}</span>
                     </div>
                     <button
                       onClick={() => commsManager.retryMediaPermissions()}
-                      className="px-2.5 py-1 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] shrink-0 transition-all cursor-pointer shadow-sm active:scale-95"
+                      className="px-2.5 py-1 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] shrink-0"
                     >
-                      Enable Mic/Cam
+                      Allow
                     </button>
                   </div>
                 )}
 
-                {/* Bottom Call Controls HUD */}
-                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 bg-slate-950/80 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-slate-800 flex items-center gap-3">
+                {/* Bottom Call Action HUD */}
+                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 bg-slate-950/85 backdrop-blur-md px-4 py-2.5 rounded-3xl border border-slate-800 flex items-center gap-3 shadow-2xl">
                   {/* Mute Mic */}
                   <button
                     onClick={() => commsManager.toggleMute()}
-                    className={`p-3 rounded-xl transition-all cursor-pointer ${
+                    className={`p-3 rounded-2xl transition-all cursor-pointer ${
                       session.isMuted
-                        ? 'bg-red-500/20 text-red-400 border border-red-500/40'
+                        ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
                         : 'bg-slate-800 hover:bg-slate-700 text-white'
                     }`}
                     title={session.isMuted ? 'Unmute Mic' : 'Mute Mic'}
@@ -536,9 +508,9 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                   {/* Toggle Camera */}
                   <button
                     onClick={() => commsManager.toggleVideo()}
-                    className={`p-3 rounded-xl transition-all cursor-pointer ${
+                    className={`p-3 rounded-2xl transition-all cursor-pointer ${
                       !session.isVideoEnabled
-                        ? 'bg-red-500/20 text-red-400 border border-red-500/40'
+                        ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
                         : 'bg-slate-800 hover:bg-slate-700 text-white'
                     }`}
                     title={session.isVideoEnabled ? 'Turn Off Camera' : 'Turn On Camera'}
@@ -546,19 +518,19 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                     {!session.isVideoEnabled ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
                   </button>
 
-                  {/* Flip Camera (Front/Back) */}
+                  {/* Flip Camera */}
                   <button
                     onClick={() => commsManager.flipCamera()}
-                    className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white transition-all cursor-pointer"
+                    className="p-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white transition-all cursor-pointer"
                     title="Flip Camera (Front/Back)"
                   >
                     <SwitchCamera className="w-5 h-5" />
                   </button>
 
-                  {/* End Call Button */}
+                  {/* End Call */}
                   <button
                     onClick={() => commsManager.endCall()}
-                    className="p-3 rounded-xl bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/30 transition-all cursor-pointer"
+                    className="p-3 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 transition-all cursor-pointer active:scale-95"
                     title="End Video Call"
                   >
                     <PhoneOff className="w-5 h-5" />
@@ -573,42 +545,46 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                 {/* Channel Header Banner */}
                 <div className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-blue-600/20 text-blue-400 flex items-center justify-center text-xl border border-blue-500/30">
+                    <div className="w-10 h-10 rounded-2xl bg-indigo-600/20 text-indigo-400 flex items-center justify-center text-xl border border-indigo-500/30">
                       {session.targetMember?.avatar || '📡'}
                     </div>
                     <div className="text-left">
-                      <div className="text-xs font-mono text-blue-400 uppercase tracking-wider">
-                        {session.isBroadcasting ? 'ALL-CALL BROADCAST' : 'DIRECT RADIO CHANNEL'}
+                      <div className="text-[10px] font-mono text-indigo-400 uppercase tracking-wider font-bold">
+                        {session.isBroadcasting ? 'ALL-CALL BROADCAST' : 'DIRECT UNIT CHANNEL'}
                       </div>
                       <div className="font-bold text-slate-100 text-sm">
-                        {session.targetMember ? session.targetMember.name : `${circleName} Emergency Grid`}
+                        {session.targetMember ? session.targetMember.name : `${circleName} Grid`}
                       </div>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => commsManager.openRadio(session.targetMember ? undefined : targetCandidates[0])}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors cursor-pointer"
+                      onClick={() => setIsToggleMode(prev => !prev)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-colors cursor-pointer border ${
+                        isToggleMode
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-slate-800 text-slate-300 border-slate-700'
+                      }`}
                     >
-                      {session.isBroadcasting ? 'Switch to 1-on-1' : 'Switch to Broadcast'}
+                      {isToggleMode ? 'Click Mode' : 'Hold Mode'}
                     </button>
                   </div>
                 </div>
 
                 {/* Channel Selector Chips */}
-                <div className="w-full mt-2.5 flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
+                <div className="w-full mt-2.5 flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
                   <button
                     type="button"
                     onClick={() => commsManager.openRadio(undefined)}
                     className={`px-3 py-1.5 rounded-xl border flex items-center gap-1.5 font-bold transition-all cursor-pointer whitespace-nowrap text-xs ${
                       session.isBroadcasting || !session.targetMember
-                        ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
+                        ? 'bg-indigo-600 text-white border-indigo-500 shadow-xs'
                         : 'bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700'
                     }`}
                   >
                     <Users className="w-3.5 h-3.5" />
-                    <span>All Circle Members ({members.length})</span>
+                    <span>All Members ({members.length})</span>
                   </button>
                   {targetCandidates.map(m => (
                     <button
@@ -617,7 +593,7 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                       onClick={() => commsManager.openRadio(m)}
                       className={`px-3 py-1.5 rounded-xl border flex items-center gap-1.5 font-bold transition-all cursor-pointer whitespace-nowrap text-xs ${
                         !session.isBroadcasting && session.targetMember?.id === m.id
-                          ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
+                          ? 'bg-indigo-600 text-white border-indigo-500 shadow-xs'
                           : 'bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700'
                       }`}
                     >
@@ -628,13 +604,12 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                 </div>
 
                 {/* Tactical Status & Wave Visualizer */}
-                <div className="my-8 flex flex-col items-center">
+                <div className="my-6 flex flex-col items-center">
                   {remoteSpeaker?.isSpeaking ? (
                     <div className="flex flex-col items-center animate-pulse">
-                      <div className="px-4 py-1 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-xs font-bold font-mono tracking-wider mb-3">
+                      <div className="px-4 py-1.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-xs font-bold font-mono tracking-wider mb-3">
                         RADIO INCOMING // {remoteSpeaker.name.toUpperCase()} SPEAKING
                       </div>
-                      {/* Audio Waves */}
                       <div className="flex items-center gap-1.5 h-12">
                         {[40, 70, 90, 50, 85, 100, 60, 95, 45, 80].map((h, i) => (
                           <span
@@ -647,15 +622,14 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                     </div>
                   ) : isPttPressed ? (
                     <div className="flex flex-col items-center">
-                      <div className="px-4 py-1 rounded-full bg-red-500/20 text-red-400 border border-red-500/40 text-xs font-bold font-mono tracking-wider mb-3 animate-pulse">
-                        TRANSMITTING LIVE AUDIO // MIC OPEN
+                      <div className="px-4 py-1.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/40 text-xs font-bold font-mono tracking-wider mb-3 animate-pulse">
+                        TRANSMITTING LIVE // MIC OPEN
                       </div>
-                      {/* Red Audio Waves */}
                       <div className="flex items-center gap-1.5 h-12">
                         {[60, 90, 100, 75, 95, 85, 100, 70, 90, 65].map((h, i) => (
                           <span
                             key={i}
-                            className="w-1.5 bg-red-500 rounded-full transition-all duration-75 animate-pulse"
+                            className="w-1.5 bg-rose-500 rounded-full transition-all duration-75 animate-pulse"
                             style={{ height: `${h}%`, animationDelay: `${i * 50}ms` }}
                           />
                         ))}
@@ -675,10 +649,9 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                   )}
                 </div>
 
-                {/* BIG PUSH-TO-TALK BUTTON */}
+                {/* THE BIG PUSH-TO-TALK BUTTON */}
                 <div className="flex flex-col items-center">
                   <button
-                    ref={pttButtonRef}
                     type="button"
                     onPointerDown={handlePttDown}
                     onPointerUp={handlePttUp}
@@ -686,33 +659,35 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                     onContextMenu={(e) => e.preventDefault()}
                     className={`relative w-40 h-40 sm:w-48 sm:h-48 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer select-none active:scale-95 shadow-2xl touch-none ${
                       isPttPressed
-                        ? 'bg-gradient-to-b from-red-600 to-red-700 text-white ring-8 ring-red-500/30 shadow-red-600/50 scale-102'
-                        : 'bg-gradient-to-b from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white ring-8 ring-blue-500/20 shadow-blue-600/30'
+                        ? 'bg-gradient-to-b from-rose-600 to-rose-700 text-white ring-8 ring-rose-500/30 shadow-rose-600/50 scale-102'
+                        : 'bg-gradient-to-b from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white ring-8 ring-indigo-500/20 shadow-indigo-600/30'
                     }`}
                     style={{ touchAction: 'none', WebkitUserSelect: 'none', userSelect: 'none', WebkitTouchCallout: 'none' }}
                   >
                     <Radio className={`w-12 h-12 mb-2 pointer-events-none ${isPttPressed ? 'animate-bounce' : ''}`} />
                     <span className="font-extrabold text-sm sm:text-base tracking-wider uppercase pointer-events-none">
-                      {isPttPressed ? 'LIVE TRANSMITTING' : 'PUSH TO TALK'}
+                      {isPttPressed ? 'TRANSMITTING' : 'PUSH TO TALK'}
                     </span>
-                    <span className="text-[10px] text-blue-200 mt-0.5 pointer-events-none">
-                      {isPttPressed ? 'Release or Click to Send' : 'Hold to Speak or Click to Start'}
+                    <span className="text-[10px] text-indigo-200 mt-0.5 pointer-events-none font-medium">
+                      {isPttPressed 
+                        ? (isToggleMode ? 'Click to Finish' : 'Release to Send')
+                        : (isToggleMode ? 'Click to Talk' : 'Hold to Speak')}
                     </span>
                   </button>
 
-                  <p className="text-[11px] text-slate-500 mt-4">
-                    Sub-second OPUS audio • Hardware noise cancellation • Tactical squelch chirps
+                  <p className="text-[11px] text-slate-500 mt-4 font-medium">
+                    Sub-second OPUS audio • Hardware echo cancellation • Automatic roger beeps
                   </p>
                 </div>
 
-                {/* Bottom Session Exit */}
+                {/* Bottom Disconnect Button */}
                 <div className="w-full mt-6 pt-4 border-t border-slate-900 flex justify-between items-center">
                   <div className="text-xs text-slate-400">
-                    Active unit: <span className="text-slate-200 font-semibold">{currentMember.name}</span>
+                    Unit: <span className="text-slate-200 font-semibold">{currentMember.name}</span>
                   </div>
                   <button
                     onClick={() => commsManager.endCall()}
-                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-red-600/20 hover:text-red-400 text-slate-300 text-xs font-semibold transition-colors cursor-pointer"
+                    className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-rose-600/20 hover:text-rose-400 text-slate-300 text-xs font-semibold transition-colors cursor-pointer border border-slate-800"
                   >
                     Disconnect Channel
                   </button>

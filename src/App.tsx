@@ -883,7 +883,7 @@ export default function App() {
           const callTime = m.activeCall.timestamp || 0;
           if (m.activeCall.status === 'ringing') {
             const ageMs = Date.now() - callTime;
-            if (ageMs < 45000 && callTime > appMountTimestamp.current && !handledCallTimestamps.current.has(callTime)) {
+            if (ageMs < 45000 && !handledCallTimestamps.current.has(callTime)) {
               const currentSession = commsManager.getSession();
               if (!currentSession || currentSession.status !== 'connected') {
                 handledCallTimestamps.current.add(callTime);
@@ -934,7 +934,7 @@ export default function App() {
         if (m.radioBurst && m.radioBurst.senderId !== memberDocId) {
           const burstTime = m.radioBurst.timestamp || 0;
           const ageMs = Date.now() - burstTime;
-          if (ageMs < 25000 && burstTime > appMountTimestamp.current && !seenRadioBurstTimestamps.current.has(burstTime)) {
+          if (ageMs < 25000 && !seenRadioBurstTimestamps.current.has(burstTime)) {
             seenRadioBurstTimestamps.current.add(burstTime);
             const target = m.radioBurst.targetMemberId;
             const isForMe = !target || 
@@ -946,7 +946,7 @@ export default function App() {
                               target.includes(memberDocId)
                             ));
             if (isForMe) {
-              commsManager.playRadioAudioBurst(m.radioBurst.audioData, m.radioBurst.senderName);
+              commsManager.playRadioAudioBurst(m.radioBurst.audioData, m.radioBurst.senderName, m.radioBurst.burstId);
             }
           }
         }
@@ -1114,7 +1114,14 @@ export default function App() {
       gridId: currentCircle.id
     };
     commsManager.initialize(currentCircle.id, myMember, members);
-  }, [currentCircle?.id, deviceId, members, memberName, memberRole, memberAvatar, currentCoords]);
+  }, [currentCircle?.id, deviceId]);
+
+  // Update members list in commsManager without tearing down active PeerJS connection!
+  useEffect(() => {
+    if (members.length > 0) {
+      commsManager.updateMembersList(members);
+    }
+  }, [members]);
 
   // Firestore Real-Time Signaling Bridge for Comms & Video Calling
   useEffect(() => {
