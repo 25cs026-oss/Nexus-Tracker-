@@ -63,11 +63,14 @@ export type SignalBridgeHandler = (data: {
   } | null;
 }) => void;
 
-const ICE_SERVERS = [
+const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' },
   { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:global.stun.twilio.com:3478' },
   { urls: 'stun:openrelay.metered.ca:80' },
   {
     urls: 'turn:openrelay.metered.ca:80',
@@ -86,6 +89,13 @@ const ICE_SERVERS = [
   }
 ];
 
+const RTC_CONFIG: RTCConfiguration = {
+  iceServers: ICE_SERVERS,
+  iceCandidatePoolSize: 10,
+  bundlePolicy: 'max-bundle',
+  rtcpMuxPolicy: 'require'
+};
+
 export class CommsManager {
   private peer: Peer | null = null;
   private myPeerId: string | null = null;
@@ -102,6 +112,11 @@ export class CommsManager {
   private dataConnections: Map<string, DataConnection> = new Map();
   private mediaRecorder: MediaRecorder | null = null;
   private pttRecordedChunks: Blob[] = [];
+
+  // Pending call handshake state
+  private pendingAnswerStream: MediaStream | null = null;
+  private pendingCallerId: string | null = null;
+  private pendingCallerPeerId: string | null = null;
 
   // Comms State
   private session: ActiveCommsSession | null = null;
@@ -200,12 +215,13 @@ export class CommsManager {
 
   public getPeerIdForMember(memberId: string): string {
     if (!this.circleId) return '';
-    const cleanCircle = this.circleId.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase().slice(0, 16);
+    const cleanCircle = this.circleId.replace(/[^a-zA-Z0-9]/g, '').toLowerCase().slice(0, 16) || 'grid';
     let idPart = memberId || 'unit';
     if (this.circleId && idPart.startsWith(this.circleId)) {
-      idPart = idPart.replace(this.circleId, '');
+      idPart = idPart.slice(this.circleId.length);
     }
-    let cleanMember = idPart.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase().slice(0, 24);
+    let cleanMember = idPart.replace(/[^a-zA-Z0-9]/g, '').toLowerCase().slice(0, 24);
+    cleanMember = cleanMember.replace(/^_+|_+$/g, '');
     if (!cleanMember) cleanMember = 'unit';
     return `nxt_${cleanCircle}_${cleanMember}`;
   }
@@ -261,6 +277,14 @@ export class CommsManager {
     this.membersList = members;
   }
 
+  public markSessionConnected() {
+    radioAudio.stopIncomingCallRingtone();
+    if (this.session && this.session.status === 'connecting') {
+      this.session.status = 'connected';
+      this.notify();
+    }
+  }
+
   private createPeer(peerId: string) {
     if (this.peer && !this.peer.destroyed) {
       try { this.peer.destroy(); } catch {}
@@ -271,9 +295,7 @@ export class CommsManager {
     try {
       this.peer = new Peer(peerId, {
         debug: 1,
-        config: {
-          iceServers: ICE_SERVERS
-        }
+        config: RTC_CONFIG
       });
 
       this.peer.on('open', (id) => {
@@ -374,6 +396,7 @@ export class CommsManager {
    * Universal handler to bind incoming WebRTC MediaStream.
    */
   private setupRemoteStream(remoteMediaStream: MediaStream) {
+    if (!remoteMediaStream) return;
     radioAudio.stopIncomingCallRingtone();
     radioAudio.playCallConnected();
     this.remoteStream = remoteMediaStream;
@@ -381,9 +404,20 @@ export class CommsManager {
       this.session.status = 'connected';
     }
 
+    // Ensure all remote tracks are enabled and live
+    try {
+      remoteMediaStream.getTracks().forEach(t => {
+        t.enabled = true;
+      });
+    } catch {}
+
     const notifyTracks = () => {
+      try {
+        remoteMediaStream.getTracks().forEach(t => { t.enabled = true; });
+      } catch {}
       this.notify();
     };
+
     try {
       remoteMediaStream.onaddtrack = notifyTracks;
       remoteMediaStream.onremovetrack = notifyTracks;
@@ -398,6 +432,62 @@ export class CommsManager {
     } catch {}
 
     this.notify();
+  }
+
+  /**
+   * Bind event listeners to MediaConnection and its underlying RTCPeerConnection.
+   */
+  private bindMediaConnectionEvents(call: MediaConnection) {
+    call.on('stream', (remoteMediaStream) => {
+      console.log('MediaConnection stream received, total tracks:', remoteMediaStream.getTracks().length);
+      this.setupRemoteStream(remoteMediaStream);
+    });
+
+    if ((call as any).remoteStream) {
+      this.setupRemoteStream((call as any).remoteStream);
+    }
+
+    const pc = call.peerConnection;
+    if (pc) {
+      try {
+        pc.ontrack = (evt) => {
+          console.log('RTCPeerConnection ontrack received:', evt.track.kind);
+          if (evt.streams && evt.streams[0]) {
+            this.setupRemoteStream(evt.streams[0]);
+          } else {
+            if (!this.remoteStream) {
+              this.remoteStream = new MediaStream();
+            }
+            if (!this.remoteStream.getTracks().some(t => t.id === evt.track.id)) {
+              this.remoteStream.addTrack(evt.track);
+            }
+            this.setupRemoteStream(this.remoteStream);
+          }
+        };
+
+        pc.oniceconnectionstatechange = () => {
+          console.log('ICE connection state:', pc.iceConnectionState);
+          if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+            if (this.session && this.session.status !== 'connected') {
+              this.session.status = 'connected';
+              this.notify();
+            }
+          }
+        };
+      } catch (pcErr) {
+        console.warn('Error attaching RTCPeerConnection listeners:', pcErr);
+      }
+    }
+
+    call.on('close', () => {
+      if (this.activeMediaConnection === call) {
+        this.endCall();
+      }
+    });
+
+    call.on('error', (err) => {
+      console.warn('MediaConnection error note:', err);
+    });
   }
 
   /**
@@ -419,34 +509,42 @@ export class CommsManager {
     const isVideo = meta.type === 'video';
 
     if (isVideo) {
-      // If we are already calling this person (outgoing call collision), auto-answer:
-      if (
+      const targetId = this.session?.targetMember?.id;
+      const targetPeerId = this.session?.targetMember?.peerId;
+      const callerId = meta.callerId || '';
+      const callerPeer = call.peer;
+
+      const isMatchingSession = Boolean(
         this.session &&
         (this.session.status === 'connecting' || this.session.status === 'connected') &&
-        this.session.targetMember &&
-        (this.session.targetMember.id === meta.callerId ||
-         this.session.targetMember.id.endsWith(meta.callerId || '') ||
-         meta.callerId?.endsWith(this.session.targetMember.id))
-      ) {
-        if (!this.localStream) {
+        (
+          (targetId && (callerId === targetId || targetId.includes(callerId) || callerId.includes(targetId))) ||
+          (targetPeerId && targetPeerId === callerPeer) ||
+          (this.pendingCallerId && (callerId === this.pendingCallerId || callerPeer === this.pendingCallerPeerId)) ||
+          (this.getPeerIdForMember(targetId || '') === callerPeer)
+        )
+      );
+
+      if (isMatchingSession) {
+        console.log('Incoming call matches active session. Auto-answering...');
+        radioAudio.stopIncomingCallRingtone();
+        const answerStream = this.pendingAnswerStream || this.localStream;
+        if (!answerStream) {
           this.getLocalMedia(true, 'user').then(s => {
             call.answer(s);
           }).catch(() => {
             call.answer();
           });
         } else {
-          call.answer(this.localStream);
+          call.answer(answerStream);
         }
 
+        this.pendingAnswerStream = null;
+        this.pendingCallerId = null;
+        this.pendingCallerPeerId = null;
+
         this.activeMediaConnection = call;
-        call.on('stream', (remoteMediaStream) => {
-          this.setupRemoteStream(remoteMediaStream);
-        });
-        call.on('close', () => {
-          if (this.activeMediaConnection === call) {
-            this.endCall();
-          }
-        });
+        this.bindMediaConnectionEvents(call);
         return;
       }
 
@@ -462,6 +560,7 @@ export class CommsManager {
         isVideo: true,
         mediaConnection: call
       };
+      this.bindMediaConnectionEvents(call);
       this.notify();
     } else {
       // Tactical Walkie-Talkie Radio -> Auto-receive and patch audio through
@@ -611,22 +710,33 @@ export class CommsManager {
   private async getLocalMedia(isVideo: boolean, facingMode: 'user' | 'environment' = 'user'): Promise<MediaStream> {
     this.permissionWarning = null;
 
+    // Release pre-warmed mic so microphone hardware is 100% unlocked for camera/mic streams
+    if (this.prewarmedMicStream) {
+      try {
+        this.prewarmedMicStream.getTracks().forEach(t => t.stop());
+      } catch {}
+      this.prewarmedMicStream = null;
+    }
+
     if (typeof window !== 'undefined' && (window as any).NexusNative?.ensureMediaPermissions) {
       try { (window as any).NexusNative.ensureMediaPermissions(); } catch {}
     }
 
+    // Reuse existing localStream if active and live
     if (this.localStream) {
-      const hasLiveVideo = this.localStream.getVideoTracks().some(t => t.readyState === 'live');
-      const hasLiveAudio = this.localStream.getAudioTracks().some(t => t.readyState === 'live');
-      if ((isVideo ? hasLiveVideo : true) && hasLiveAudio) {
+      const liveVideo = this.localStream.getVideoTracks().filter(t => t.readyState === 'live');
+      const liveAudio = this.localStream.getAudioTracks().filter(t => t.readyState === 'live');
+      if ((isVideo ? liveVideo.length > 0 : true) && liveAudio.length > 0) {
+        liveVideo.forEach(t => { t.enabled = this.session ? this.session.isVideoEnabled : true; });
+        liveAudio.forEach(t => { t.enabled = this.session ? !this.session.isMuted : true; });
         return this.localStream;
       }
       this.localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
       this.localStream = null;
     }
 
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      // Attempt 1: Full requested video + audio
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+      // Stage 1: Flexible ideal constraints
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -636,29 +746,47 @@ export class CommsManager {
           },
           video: isVideo ? {
             facingMode: { ideal: facingMode },
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 }
           } : false
         });
+        stream.getAudioTracks().forEach(t => { t.enabled = true; });
+        stream.getVideoTracks().forEach(t => { t.enabled = true; });
         this.localStream = stream;
         return stream;
       } catch (err1) {
         console.warn('Comms: Attempt 1 getUserMedia flexible constraints note:', err1);
       }
 
-      // Attempt 2: Simple boolean audio + video
+      // Stage 2: Standard constraints with facingMode
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: isVideo ? { facingMode } : false
+        });
+        stream.getAudioTracks().forEach(t => { t.enabled = true; });
+        stream.getVideoTracks().forEach(t => { t.enabled = true; });
+        this.localStream = stream;
+        return stream;
+      } catch (err2) {
+        console.warn('Comms: Attempt 2 simple constraints note:', err2);
+      }
+
+      // Stage 3: Simple boolean audio + video
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: true,
           video: isVideo
         });
+        stream.getAudioTracks().forEach(t => { t.enabled = true; });
+        stream.getVideoTracks().forEach(t => { t.enabled = true; });
         this.localStream = stream;
         return stream;
-      } catch (err2) {
-        console.warn('Comms: Attempt 2 simple boolean constraints note:', err2);
+      } catch (err3) {
+        console.warn('Comms: Attempt 3 simple boolean note:', err3);
       }
 
-      // Attempt 3: Separate Video & Audio track acquisition
+      // Stage 4: Separate Video & Audio track acquisition
       if (isVideo) {
         try {
           let videoTrack: MediaStreamTrack | null = null;
@@ -678,15 +806,16 @@ export class CommsManager {
             const combined = new MediaStream();
             if (videoTrack) combined.addTrack(videoTrack);
             if (audioTrack) combined.addTrack(audioTrack);
+            combined.getTracks().forEach(t => { t.enabled = true; });
             this.localStream = combined;
             return combined;
           }
-        } catch (err3) {
-          console.warn('Comms: Attempt 3 separate track acquisition note:', err3);
+        } catch (err4) {
+          console.warn('Comms: Attempt 4 separate track acquisition note:', err4);
         }
       }
 
-      // Attempt 4: Audio-Only fallback with canvas track if camera hardware failed
+      // Stage 5: Audio-Only with synthetic tactical video canvas (for devices without camera)
       if (isVideo) {
         try {
           const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
@@ -695,36 +824,40 @@ export class CommsManager {
           canvas.height = 480;
           const ctx = canvas.getContext('2d');
           if (ctx) {
-            ctx.fillStyle = '#0f172a';
+            ctx.fillStyle = '#090d16';
             ctx.fillRect(0, 0, 640, 480);
-            ctx.fillStyle = '#38bdf8';
-            ctx.font = 'bold 24px sans-serif';
+            ctx.fillStyle = '#10b981';
+            ctx.font = 'bold 22px monospace';
             ctx.textAlign = 'center';
-            ctx.fillText('🎙️ Voice Relay Active', 320, 220);
+            ctx.fillText('⚡ NEXUS SECURE COMMS', 320, 210);
             ctx.fillStyle = '#94a3b8';
-            ctx.font = '16px sans-serif';
-            ctx.fillText('(Camera not available on this device)', 320, 260);
+            ctx.font = '16px monospace';
+            ctx.fillText('Live Tactical Audio Stream', 320, 250);
+            ctx.font = '12px monospace';
+            ctx.fillStyle = '#64748b';
+            ctx.fillText('(Camera unavailable on this device)', 320, 280);
           }
           const canvasStream = (canvas as any).captureStream ? (canvas as any).captureStream(5) : null;
           if (canvasStream && canvasStream.getVideoTracks().length > 0) {
             audioStream.addTrack(canvasStream.getVideoTracks()[0]);
           }
 
+          audioStream.getTracks().forEach(t => { t.enabled = true; });
           this.localStream = audioStream;
-          this.permissionWarning = 'Camera unavailable or blocked. Running in voice-call mode.';
+          this.permissionWarning = 'Camera unavailable. Live audio calling active.';
           if (this.session) {
             this.session.isVideoEnabled = false;
           }
           this.notify();
           return audioStream;
-        } catch (err4) {
-          console.warn('Comms: Attempt 4 audio-only fallback failed:', err4);
+        } catch (err5) {
+          console.warn('Comms: Attempt 5 canvas fallback note:', err5);
         }
       }
     }
 
     // Blank fallback MediaStream so app never crashes
-    this.permissionWarning = 'Microphone/Camera blocked. Check browser or app permissions.';
+    this.permissionWarning = 'Microphone/Camera access required. Please allow permissions in browser or app settings.';
     this.notify();
     const empty = new MediaStream();
     this.localStream = empty;
@@ -968,6 +1101,12 @@ export class CommsManager {
     };
     this.notify();
 
+    // Release prewarmed mic so hardware mic is fully unlocked
+    if (this.prewarmedMicStream) {
+      try { this.prewarmedMicStream.getTracks().forEach(t => t.stop()); } catch {}
+      this.prewarmedMicStream = null;
+    }
+
     // 1. Acquire local media FIRST with progressive fallback
     const stream = await this.getLocalMedia(true, 'user');
     await this.ensurePeerOpen();
@@ -999,25 +1138,13 @@ export class CommsManager {
             callerId: this.currentMember?.id,
             callerName: this.currentMember?.name || 'Member',
             callerAvatar: this.currentMember?.avatar || '👤',
-            callerRole: this.currentMember?.role
+            callerRole: this.currentMember?.role,
+            callerPeerId: this.myPeerId || this.getPeerIdForMember(this.currentMember?.id || '')
           }
         });
 
         this.activeMediaConnection = call;
-
-        call.on('stream', (remoteMediaStream) => {
-          this.setupRemoteStream(remoteMediaStream);
-        });
-
-        call.on('close', () => {
-          if (this.activeMediaConnection === call) {
-            this.endCall();
-          }
-        });
-
-        call.on('error', (err) => {
-          console.warn('Video call connect error:', err);
-        });
+        this.bindMediaConnectionEvents(call);
       } catch (e) {
         console.warn('Peer call transmit error:', e);
       }
@@ -1061,6 +1188,12 @@ export class CommsManager {
     };
     this.notify();
 
+    // Release pre-warmed mic so hardware mic is fully unlocked
+    if (this.prewarmedMicStream) {
+      try { this.prewarmedMicStream.getTracks().forEach(t => t.stop()); } catch {}
+      this.prewarmedMicStream = null;
+    }
+
     // 1. Acquire local media
     const stream = await this.getLocalMedia(true, 'user');
 
@@ -1085,44 +1218,36 @@ export class CommsManager {
       try {
         incoming.mediaConnection.answer(stream);
         this.activeMediaConnection = incoming.mediaConnection;
-
-        incoming.mediaConnection.on('stream', (remoteMediaStream) => {
-          this.setupRemoteStream(remoteMediaStream);
-        });
-
-        incoming.mediaConnection.on('close', () => {
-          if (this.activeMediaConnection === incoming.mediaConnection) {
-            this.endCall();
-          }
-        });
+        this.bindMediaConnectionEvents(incoming.mediaConnection);
       } catch (err) {
         console.warn('Answer media connection error:', err);
       }
-    } else if (incoming.callerPeerId && this.peer && !this.peer.destroyed) {
-      // Reverse peer call if direct answer was not received
-      try {
-        const call = this.peer.call(incoming.callerPeerId, stream, {
-          metadata: {
-            type: 'video',
-            callerId: this.currentMember?.id,
-            callerName: this.currentMember?.name || 'Member',
-            callerAvatar: this.currentMember?.avatar || '👤'
-          }
-        });
-        this.activeMediaConnection = call;
+    } else {
+      // Store pending stream so when incoming call arrives from PeerJS within milliseconds, it auto-answers immediately!
+      this.pendingAnswerStream = stream;
+      this.pendingCallerId = incoming.callerId;
+      this.pendingCallerPeerId = incoming.callerPeerId || '';
 
-        call.on('stream', (remoteMediaStream) => {
-          this.setupRemoteStream(remoteMediaStream);
-        });
-
-        call.on('close', () => {
-          if (this.activeMediaConnection === call) {
-            this.endCall();
+      setTimeout(() => {
+        if (!this.activeMediaConnection && this.session && this.session.status === 'connected' && incoming.callerPeerId && this.peer && !this.peer.destroyed) {
+          console.log('Fallback: Dialing caller directly...');
+          try {
+            const call = this.peer.call(incoming.callerPeerId, stream, {
+              metadata: {
+                type: 'video',
+                callerId: this.currentMember?.id,
+                callerName: this.currentMember?.name || 'Member',
+                callerAvatar: this.currentMember?.avatar || '👤',
+                callerPeerId: this.myPeerId || this.getPeerIdForMember(this.currentMember?.id || '')
+              }
+            });
+            this.activeMediaConnection = call;
+            this.bindMediaConnectionEvents(call);
+          } catch (e) {
+            console.warn('Fallback dial error:', e);
           }
-        });
-      } catch (e) {
-        console.warn('Reverse peer call error:', e);
-      }
+        }
+      }, 3500);
     }
   }
 
@@ -1203,6 +1328,10 @@ export class CommsManager {
   public endCall() {
     radioAudio.stopIncomingCallRingtone();
     radioAudio.playCallEndTone();
+
+    this.pendingAnswerStream = null;
+    this.pendingCallerId = null;
+    this.pendingCallerPeerId = null;
 
     if (this.activeMediaConnection) {
       try { this.activeMediaConnection.close(); } catch {}

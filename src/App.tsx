@@ -920,10 +920,7 @@ export default function App() {
         if (m.activeCall && isCallerMe) {
           if (m.activeCall.status === 'connected') {
             radioAudio.stopIncomingCallRingtone();
-            const session = commsManager.getSession();
-            if (session && session.status === 'connecting') {
-              session.status = 'connected';
-            }
+            commsManager.markSessionConnected();
           } else if (m.activeCall.status === 'ended') {
             radioAudio.stopIncomingCallRingtone();
             commsManager.endCall();
@@ -2644,6 +2641,7 @@ export default function App() {
                           setShowCommsModal(true);
                         }}
                         onStartVideoCall={(m) => {
+                          radioAudio.resumeContext();
                           commsManager.startVideoCall(m);
                           setShowCommsModal(true);
                         }}
@@ -2669,6 +2667,7 @@ export default function App() {
                       circlePin={currentCircle.id}
                       members={members}
                       onStartVideoCall={(m) => {
+                        radioAudio.resumeContext();
                         commsManager.startVideoCall(m);
                         setShowCommsModal(true);
                       }}
@@ -3334,6 +3333,7 @@ export default function App() {
                 setShowCommsModal(true);
               }}
               onStartVideoCall={(m) => {
+                radioAudio.resumeContext();
                 commsManager.startVideoCall(m);
                 setShowCommsModal(true);
               }}
@@ -3405,6 +3405,7 @@ export default function App() {
               circlePin={currentCircle.id}
               members={members}
               onStartVideoCall={(m) => {
+                radioAudio.resumeContext();
                 commsManager.startVideoCall(m);
                 setShowCommsModal(true);
               }}
@@ -3488,6 +3489,7 @@ export default function App() {
                       setShowCommsModal(true);
                     }}
                     onStartVideoCall={(m) => {
+                      radioAudio.resumeContext();
                       commsManager.startVideoCall(m);
                       setShowCommsModal(true);
                     }}

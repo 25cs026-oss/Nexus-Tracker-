@@ -60,9 +60,11 @@ export const CommsModal: React.FC<CommsModalProps> = ({
   const [permissionWarning, setPermissionWarning] = useState<string | null>(commsManager.getPermissionWarning());
   const [streamTick, setStreamTick] = useState<number>(0);
   const [isToggleMode, setIsToggleMode] = useState<boolean>(false);
+  const [isAudioMutedByBrowser, setIsAudioMutedByBrowser] = useState<boolean>(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const isPttPointerDown = useRef<boolean>(false);
   const pttPressStartTime = useRef<number>(0);
   const lastPttActionTime = useRef<number>(0);
@@ -154,7 +156,7 @@ export const CommsModal: React.FC<CommsModalProps> = ({
     }
   };
 
-  // Attach local and remote video streams
+  // Attach local and remote video & audio streams
   useEffect(() => {
     const localStream = commsManager.getLocalStream();
     if (localVideoRef.current && localStream) {
@@ -165,15 +167,38 @@ export const CommsModal: React.FC<CommsModalProps> = ({
     }
 
     const remoteStream = commsManager.getRemoteStream();
-    if (remoteVideoRef.current && remoteStream) {
-      if (remoteVideoRef.current.srcObject !== remoteStream) {
+    if (remoteStream) {
+      if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remoteStream) {
         remoteVideoRef.current.srcObject = remoteStream;
       }
-      remoteVideoRef.current.play().catch((err) => {
-        console.warn('Remote video playback note:', err);
-      });
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.play().catch((err) => {
+          console.warn('Remote video playback note:', err);
+        });
+      }
+
+      if (remoteAudioRef.current && remoteAudioRef.current.srcObject !== remoteStream) {
+        remoteAudioRef.current.srcObject = remoteStream;
+      }
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.play().then(() => {
+          setIsAudioMutedByBrowser(false);
+        }).catch((err) => {
+          console.warn('Remote audio autoplay blocked note:', err);
+          setIsAudioMutedByBrowser(true);
+        });
+      }
     }
   }, [session, session?.status, streamTick]);
+
+  const handleUnblockAudio = () => {
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.play().then(() => {
+        setIsAudioMutedByBrowser(false);
+      }).catch(() => {});
+    }
+    radioAudio.resumeContext();
+  };
 
   // Call duration timer
   useEffect(() => {
@@ -232,7 +257,13 @@ export const CommsModal: React.FC<CommsModalProps> = ({
               <PhoneOff className="w-5 h-5" />
             </button>
             <button
-              onClick={() => commsManager.acceptIncomingCall()}
+              onClick={async () => {
+                if (remoteAudioRef.current) {
+                  remoteAudioRef.current.play().catch(() => {});
+                }
+                radioAudio.resumeContext();
+                await commsManager.acceptIncomingCall();
+              }}
               className="p-3 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 transition-all cursor-pointer animate-pulse active:scale-95"
               title="Accept Call"
             >
@@ -392,7 +423,13 @@ export const CommsModal: React.FC<CommsModalProps> = ({
                                 <span>Radio</span>
                               </button>
                               <button
-                                onClick={() => commsManager.startVideoCall(m)}
+                                onClick={async () => {
+                                  if (remoteAudioRef.current) {
+                                    remoteAudioRef.current.play().catch(() => {});
+                                  }
+                                  radioAudio.resumeContext();
+                                  await commsManager.startVideoCall(m);
+                                }}
                                 className="px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white text-xs font-semibold border border-emerald-500/30 flex items-center gap-1.5 transition-all cursor-pointer"
                                 title="Start Video Call"
                               >
@@ -412,13 +449,34 @@ export const CommsModal: React.FC<CommsModalProps> = ({
             {/* LIVE VIDEO CALL VIEW */}
             {session && session.mode === 'video' && (
               <div className="relative flex-1 bg-black min-h-[400px] sm:min-h-[480px] flex items-center justify-center overflow-hidden">
-                {/* Main Remote Video Element */}
+                {/* Dedicated Remote Audio Output: Unmuted so audio flows uninterrupted */}
+                <audio
+                  ref={remoteAudioRef}
+                  autoPlay
+                  playsInline
+                />
+
+                {/* Main Remote Video Element: Muted so browser autoplay policy NEVER blocks video */}
                 <video
                   ref={remoteVideoRef}
                   autoPlay
                   playsInline
+                  muted
                   className="w-full h-full object-cover"
                 />
+
+                {/* Audio Autoplay Unblock Helper if mobile browser blocked background audio */}
+                {isAudioMutedByBrowser && (
+                  <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30">
+                    <button
+                      onClick={handleUnblockAudio}
+                      className="px-4 py-2 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-2 shadow-2xl animate-bounce cursor-pointer"
+                    >
+                      <Volume2 className="w-4 h-4" />
+                      <span>Tap to Enable Audio</span>
+                    </button>
+                  </div>
+                )}
 
                 {/* Connecting Screen */}
                 {session.status === 'connecting' && (
