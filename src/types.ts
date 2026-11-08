@@ -43,6 +43,7 @@ export interface DeviceMember {
     type: 'video' | 'radio';
     status: 'ringing' | 'connected' | 'ended';
     callerPeerId: string;
+    receiverPeerId?: string;
     timestamp: number;
   } | null;
   radioBurst?: {

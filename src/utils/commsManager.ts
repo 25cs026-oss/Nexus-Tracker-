@@ -51,6 +51,7 @@ export type SignalBridgeHandler = (data: {
     type: 'video' | 'radio';
     status: 'ringing' | 'connected' | 'ended';
     callerPeerId: string;
+    receiverPeerId?: string;
     timestamp: number;
   } | null;
   radioBurst?: {
@@ -71,6 +72,7 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun4.l.google.com:19302' },
   { urls: 'stun:stun.cloudflare.com:3478' },
   { urls: 'stun:global.stun.twilio.com:3478' },
+  { urls: 'stun:stun.services.mozilla.com' },
   { urls: 'stun:openrelay.metered.ca:80' },
   {
     urls: 'turn:openrelay.metered.ca:80',
@@ -92,8 +94,7 @@ const ICE_SERVERS: RTCIceServer[] = [
 const RTC_CONFIG: RTCConfiguration = {
   iceServers: ICE_SERVERS,
   iceCandidatePoolSize: 10,
-  bundlePolicy: 'max-bundle',
-  rtcpMuxPolicy: 'require'
+  bundlePolicy: 'balanced'
 };
 
 export class CommsManager {
@@ -277,11 +278,39 @@ export class CommsManager {
     this.membersList = members;
   }
 
-  public markSessionConnected() {
+  public markSessionConnected(receiverPeerId?: string) {
     radioAudio.stopIncomingCallRingtone();
-    if (this.session && this.session.status === 'connecting') {
+    if (this.session && (this.session.status === 'connecting' || this.session.status === 'connected')) {
       this.session.status = 'connected';
       this.notify();
+
+      // If we don't have an active media connection or remote stream yet, and we have the receiver's live peer ID:
+      if (receiverPeerId && (!this.activeMediaConnection || !this.remoteStream)) {
+        console.log('Caller received receiver peer ID from Firestore signal. Verifying P2P connection:', receiverPeerId);
+        this.ensurePeerOpen().then(isOpen => {
+          if (isOpen && this.peer && !this.peer.destroyed) {
+            const stream = this.localStream;
+            if (stream) {
+              try {
+                const call = this.peer.call(receiverPeerId, stream, {
+                  metadata: {
+                    type: 'video',
+                    callerId: this.currentMember?.id,
+                    callerName: this.currentMember?.name || 'Member',
+                    callerAvatar: this.currentMember?.avatar || '👤',
+                    callerRole: this.currentMember?.role,
+                    callerPeerId: this.myPeerId || this.getPeerIdForMember(this.currentMember?.id || '')
+                  }
+                });
+                this.activeMediaConnection = call;
+                this.bindMediaConnectionEvents(call);
+              } catch (e) {
+                console.warn('Caller direct redial error:', e);
+              }
+            }
+          }
+        });
+      }
     }
   }
 
@@ -315,11 +344,27 @@ export class CommsManager {
         this.handleDataConnection(conn);
       });
 
+      this.peer.on('disconnected', () => {
+        console.warn('PeerJS connection lost. Auto-reconnecting to signaling broker...');
+        try {
+          if (this.peer && !this.peer.destroyed) {
+            this.peer.reconnect();
+          }
+        } catch {}
+      });
+
       this.peer.on('error', (err: any) => {
         if (err.type === 'unavailable-id') {
           console.warn('Peer ID collision. Generating unique sub-peer ID...');
           const fallbackId = `${peerId}_${Math.random().toString(36).substring(2, 7)}`;
           this.createPeer(fallbackId);
+        } else if (err.type === 'disconnected' || err.type === 'network') {
+          console.warn('PeerJS network hiccup. Reconnecting...');
+          try {
+            if (this.peer && !this.peer.destroyed) {
+              this.peer.reconnect();
+            }
+          } catch {}
         } else {
           console.warn('PeerJS tactical comms note:', err);
         }
@@ -363,10 +408,12 @@ export class CommsManager {
     type: 'video' | 'radio';
     status: 'ringing' | 'connected' | 'ended';
     callerPeerId: string;
+    receiverPeerId?: string;
     timestamp: number;
   }) {
-    if (this.session && (this.session.status === 'connected' || this.session.status === 'connecting')) {
-      return; // Already in a call
+    // Only block if already in an active dedicated video call
+    if (this.session && this.session.mode === 'video' && (this.session.status === 'connected' || this.session.status === 'connecting')) {
+      return; // Already in a video call
     }
 
     if (this.handledCallTimestamps.has(callData.timestamp)) {
@@ -472,6 +519,9 @@ export class CommsManager {
               this.session.status = 'connected';
               this.notify();
             }
+          } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+            console.warn('ICE connection state:', pc.iceConnectionState, '- executing recovery...');
+            this.reconnectActiveCall();
           }
         };
       } catch (pcErr) {
@@ -516,6 +566,7 @@ export class CommsManager {
 
       const isMatchingSession = Boolean(
         this.session &&
+        this.session.mode === 'video' &&
         (this.session.status === 'connecting' || this.session.status === 'connected') &&
         (
           (targetId && (callerId === targetId || targetId.includes(callerId) || callerId.includes(targetId))) ||
@@ -707,7 +758,7 @@ export class CommsManager {
   /**
    * Acquire local camera & microphone streams with progressive multi-stage fallback.
    */
-  private async getLocalMedia(isVideo: boolean, facingMode: 'user' | 'environment' = 'user'): Promise<MediaStream> {
+  private async getLocalMedia(isVideo: boolean, facingMode: 'user' | 'environment' = 'user', forceNewVideo: boolean = false): Promise<MediaStream> {
     this.permissionWarning = null;
 
     // Release pre-warmed mic so microphone hardware is 100% unlocked for camera/mic streams
@@ -722,8 +773,8 @@ export class CommsManager {
       try { (window as any).NexusNative.ensureMediaPermissions(); } catch {}
     }
 
-    // Reuse existing localStream if active and live
-    if (this.localStream) {
+    // Reuse existing localStream if active and live (unless camera flip requested)
+    if (this.localStream && !forceNewVideo) {
       const liveVideo = this.localStream.getVideoTracks().filter(t => t.readyState === 'live');
       const liveAudio = this.localStream.getAudioTracks().filter(t => t.readyState === 'live');
       if ((isVideo ? liveVideo.length > 0 : true) && liveAudio.length > 0) {
@@ -732,6 +783,10 @@ export class CommsManager {
         return this.localStream;
       }
       this.localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+      this.localStream = null;
+    } else if (this.localStream && forceNewVideo) {
+      // Stop old video tracks so hardware camera sensor is released for new facingMode
+      this.localStream.getVideoTracks().forEach(t => { try { t.stop(); } catch {} });
       this.localStream = null;
     }
 
@@ -1197,7 +1252,7 @@ export class CommsManager {
     // 1. Acquire local media
     const stream = await this.getLocalMedia(true, 'user');
 
-    // 2. Signal connected state to Firestore bridge so caller stops ringing
+    // 2. Signal connected state to Firestore bridge so caller stops ringing & receives receiverPeerId
     if (this.signalBridge && this.currentMember) {
       this.signalBridge({
         activeCall: {
@@ -1209,6 +1264,7 @@ export class CommsManager {
           type: 'video',
           status: 'connected',
           callerPeerId: incoming.callerPeerId || '',
+          receiverPeerId: this.myPeerId || this.getPeerIdForMember(this.currentMember.id),
           timestamp: Date.now()
         }
       });
@@ -1228,9 +1284,9 @@ export class CommsManager {
       this.pendingCallerId = incoming.callerId;
       this.pendingCallerPeerId = incoming.callerPeerId || '';
 
-      setTimeout(() => {
+      const attemptDirectDial = () => {
         if (!this.activeMediaConnection && this.session && this.session.status === 'connected' && incoming.callerPeerId && this.peer && !this.peer.destroyed) {
-          console.log('Fallback: Dialing caller directly...');
+          console.log('Dialing caller directly via verified callerPeerId:', incoming.callerPeerId);
           try {
             const call = this.peer.call(incoming.callerPeerId, stream, {
               metadata: {
@@ -1244,10 +1300,13 @@ export class CommsManager {
             this.activeMediaConnection = call;
             this.bindMediaConnectionEvents(call);
           } catch (e) {
-            console.warn('Fallback dial error:', e);
+            console.warn('Fallback direct dial error:', e);
           }
         }
-      }, 3500);
+      };
+
+      setTimeout(attemptDirectDial, 500);
+      setTimeout(attemptDirectDial, 2200);
     }
   }
 
@@ -1307,19 +1366,61 @@ export class CommsManager {
     this.notify();
 
     try {
-      const stream = await this.getLocalMedia(true, nextFacing);
+      const stream = await this.getLocalMedia(true, nextFacing, true);
       const newVideoTrack = stream.getVideoTracks()[0];
       if (newVideoTrack && this.activeMediaConnection?.peerConnection) {
         const senders = this.activeMediaConnection.peerConnection.getSenders();
         const videoSender = senders.find(s => s.track && s.track.kind === 'video');
         if (videoSender) {
-          videoSender.replaceTrack(newVideoTrack);
+          await videoSender.replaceTrack(newVideoTrack);
         }
       }
       this.notify();
     } catch (e) {
       console.warn('Failed to flip camera:', e);
     }
+  }
+
+  /**
+   * Automatic recovery routine when ICE connection fails or is disconnected.
+   */
+  public reconnectActiveCall() {
+    if (!this.session || this.session.mode !== 'video') return;
+    const target = this.session.targetMember;
+    if (!target) return;
+
+    console.log('CommsManager: Executing ICE restart & connection recovery...');
+    const pc = this.activeMediaConnection?.peerConnection;
+    if (pc && typeof (pc as any).restartIce === 'function') {
+      try {
+        (pc as any).restartIce();
+      } catch {}
+    }
+
+    setTimeout(() => {
+      if (this.session && this.session.mode === 'video' && (!this.remoteStream || this.activeMediaConnection?.peerConnection?.iceConnectionState === 'failed')) {
+        const targetPeerId = target.peerId || this.getPeerIdForMember(target.id);
+        const stream = this.localStream;
+        if (stream && this.peer && !this.peer.destroyed) {
+          try {
+            console.log('CommsManager: Redialing peer for active call recovery:', targetPeerId);
+            const call = this.peer.call(targetPeerId, stream, {
+              metadata: {
+                type: 'video',
+                callerId: this.currentMember?.id,
+                callerName: this.currentMember?.name || 'Member',
+                callerAvatar: this.currentMember?.avatar || '👤',
+                callerPeerId: this.myPeerId || this.getPeerIdForMember(this.currentMember?.id || '')
+              }
+            });
+            this.activeMediaConnection = call;
+            this.bindMediaConnectionEvents(call);
+          } catch (err) {
+            console.warn('CommsManager recovery redial note:', err);
+          }
+        }
+      }
+    }, 1800);
   }
 
   /**

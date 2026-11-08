@@ -885,7 +885,7 @@ export default function App() {
             const ageMs = Date.now() - callTime;
             if (ageMs < 45000 && !handledCallTimestamps.current.has(callTime)) {
               const currentSession = commsManager.getSession();
-              if (!currentSession || currentSession.status !== 'connected') {
+              if (!currentSession || currentSession.mode !== 'video' || currentSession.status !== 'connected') {
                 handledCallTimestamps.current.add(callTime);
                 commsManager.handleRemoteIncomingCallSignal(m.activeCall);
                 setShowCommsModal(true);
@@ -920,7 +920,7 @@ export default function App() {
         if (m.activeCall && isCallerMe) {
           if (m.activeCall.status === 'connected') {
             radioAudio.stopIncomingCallRingtone();
-            commsManager.markSessionConnected();
+            commsManager.markSessionConnected(m.activeCall.receiverPeerId);
           } else if (m.activeCall.status === 'ended') {
             radioAudio.stopIncomingCallRingtone();
             commsManager.endCall();

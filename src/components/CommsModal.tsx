@@ -156,37 +156,57 @@ export const CommsModal: React.FC<CommsModalProps> = ({
     }
   };
 
-  // Attach local and remote video & audio streams
+  // Attach local and remote video & audio streams with auto-play recovery
   useEffect(() => {
     const localStream = commsManager.getLocalStream();
     if (localVideoRef.current && localStream) {
-      if (localVideoRef.current.srcObject !== localStream) {
-        localVideoRef.current.srcObject = localStream;
+      const lv = localVideoRef.current;
+      if (lv.srcObject !== localStream) {
+        lv.srcObject = localStream;
       }
-      localVideoRef.current.play().catch(() => {});
+      lv.setAttribute('playsinline', 'true');
+      lv.setAttribute('webkit-playsinline', 'true');
+      const playLocal = () => {
+        lv.play().catch(() => {});
+      };
+      lv.onloadedmetadata = playLocal;
+      playLocal();
     }
 
     const remoteStream = commsManager.getRemoteStream();
     if (remoteStream) {
-      if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remoteStream) {
-        remoteVideoRef.current.srcObject = remoteStream;
-      }
       if (remoteVideoRef.current) {
-        remoteVideoRef.current.play().catch((err) => {
-          console.warn('Remote video playback note:', err);
-        });
+        const rv = remoteVideoRef.current;
+        if (rv.srcObject !== remoteStream) {
+          rv.srcObject = remoteStream;
+        }
+        rv.setAttribute('playsinline', 'true');
+        rv.setAttribute('webkit-playsinline', 'true');
+        const playRemoteVideo = () => {
+          rv.play().catch((err) => {
+            console.warn('Remote video playback note:', err);
+          });
+        };
+        rv.onloadedmetadata = playRemoteVideo;
+        playRemoteVideo();
       }
 
-      if (remoteAudioRef.current && remoteAudioRef.current.srcObject !== remoteStream) {
-        remoteAudioRef.current.srcObject = remoteStream;
-      }
       if (remoteAudioRef.current) {
-        remoteAudioRef.current.play().then(() => {
-          setIsAudioMutedByBrowser(false);
-        }).catch((err) => {
-          console.warn('Remote audio autoplay blocked note:', err);
-          setIsAudioMutedByBrowser(true);
-        });
+        const ra = remoteAudioRef.current;
+        if (ra.srcObject !== remoteStream) {
+          ra.srcObject = remoteStream;
+        }
+        ra.setAttribute('playsinline', 'true');
+        const playRemoteAudio = () => {
+          ra.play().then(() => {
+            setIsAudioMutedByBrowser(false);
+          }).catch((err) => {
+            console.warn('Remote audio autoplay blocked note:', err);
+            setIsAudioMutedByBrowser(true);
+          });
+        };
+        ra.onloadedmetadata = playRemoteAudio;
+        playRemoteAudio();
       }
     }
   }, [session, session?.status, streamTick]);

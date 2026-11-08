@@ -51,9 +51,12 @@ export const WalkieTalkieStation: React.FC<WalkieTalkieStationProps> = ({
   const pressStartTimeRef = useRef<number>(0);
   const lastActionTimeRef = useRef<number>(0);
 
-  // Pre-warm microphone immediately on station load
+  // Pre-warm microphone on station load only if not already in an active video call
   useEffect(() => {
-    commsManager.openRadio(selectedTargetId === 'all' ? undefined : members.find(m => m.id === selectedTargetId));
+    const currentSession = commsManager.getSession();
+    if (!currentSession || currentSession.mode !== 'video') {
+      commsManager.openRadio(selectedTargetId === 'all' ? undefined : members.find(m => m.id === selectedTargetId));
+    }
   }, [selectedTargetId]);
 
   // Sync state with commsManager
